@@ -17,6 +17,10 @@ from .dithering.atkinson import AtkinsonDither
 from .dithering.sierra import SierraDither
 from .dithering.blue_noise import BlueNoiseDither
 from .dithering.ordered import OrderedDither
+from .dithering.serpentine import SerpentineDither
+from .dithering.riemersma import RiemersmaDither
+from .dithering.structure_aware import StructureAwareDither
+from .dithering.dbs import DBSDither
 from .color_model import ColorModel
 
 class Analyzer:
@@ -48,7 +52,11 @@ class Analyzer:
             2: SierraDither(),
             3: None, # 无
             4: BlueNoiseDither(),
-            5: OrderedDither()
+            5: OrderedDither(),
+            6: SerpentineDither(),       # 蛇形 FS
+            7: RiemersmaDither(),        # Hilbert 曲线
+            8: StructureAwareDither(),   # 结构感知
+            9: DBSDither()               # DBS 极致画质
         }
         
     def _update_dither_settings(self, metric: str):
@@ -79,14 +87,15 @@ class Analyzer:
         self.image = img
         
     def process(self, settings: dict, materials: list[dict], 
-                width_mm: float = 100, pixel_size_mm: float = 0.4):
+                width_mm: float = 100, pixel_size_mm: float = 0.4,
+                layer_height_mm: float = 0.08, layers: int = 5):
         """执行处理流程"""
         if self.image is None:
             return
             
         # 1. 计算目标像素尺寸
         h, w = self.image.shape[:2]
-        scale = width_mm / pixel_size_mm / max(h, w) # 错误，width_mm 应该是宽度
+        # scale = width_mm / pixel_size_mm / max(h, w)
         target_w = int(width_mm / pixel_size_mm)
         target_h = int(target_w * h / w)
         
@@ -95,8 +104,7 @@ class Analyzer:
         current_img = img_resized
         
         # 2. 生成目标调色板 (Virtual Palette based on Materials)
-        # 假设 5 层 (包括底层)
-        color_model = ColorModel(materials, layer_height=0.08, total_layers=5)
+        color_model = ColorModel(materials, layer_height=layer_height_mm, total_layers=layers)
         palette, combinations = color_model.generate_palette()
         self.palette = palette
         self.combinations = combinations

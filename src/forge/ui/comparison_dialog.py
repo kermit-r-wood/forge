@@ -294,23 +294,25 @@ class ComparisonDialog(QDialog):
     """算法比较对话框"""
     
     COMBINATIONS = [
-        # 行 1: 高保真 (新算法)
-        {"preprocess": 2, "quantize": 3, "dither": 4, "distance_metric": "oklab", "label": "🌟 Blue Noise + OKLab (推荐)"},
-        {"preprocess": 3, "quantize": 3, "dither": 4, "distance_metric": "ciede2000", "label": "锐化 + Blue Noise"},
-        {"preprocess": 2, "quantize": 3, "dither": 5, "distance_metric": "ciede2000", "label": "像素艺术: Bayer抖动"},
+        # 行 1: 新算法 (推荐)
+        {"preprocess": 2, "quantize": 3, "dither": 7, "distance_metric": "oklab", "label": "🌟 Hilbert曲线 + OKLab (推荐)"},
+        {"preprocess": 2, "quantize": 3, "dither": 8, "distance_metric": "oklab", "label": "🎯 结构感知 + OKLab"},
+        {"preprocess": 2, "quantize": 3, "dither": 6, "distance_metric": "oklab", "label": "蛇形FS + OKLab"},
+        
+        # 行 2: 高质量选项
+        {"preprocess": 2, "quantize": 3, "dither": 9, "distance_metric": "oklab", "label": "💎 DBS极致画质 (慢)"},
+        {"preprocess": 2, "quantize": 3, "dither": 4, "distance_metric": "oklab", "label": "Blue Noise + OKLab"},
+        {"preprocess": 3, "quantize": 3, "dither": 7, "distance_metric": "ciede2000", "label": "锐化 + Hilbert"},
 
-        # 行 2: 平滑/去噪
-        {"preprocess": 1, "quantize": 3, "dither": 4, "distance_metric": "oklab", "label": "平滑: 引导滤波 + Blue Noise"},
-        {"preprocess": 2, "quantize": 3, "dither": 3, "distance_metric": "oklab", "label": "纯净: 无抖动 + OKLab"},
-        {"preprocess": 3, "quantize": 3, "dither": 0, "distance_metric": "oklab", "label": "高对比: 锐化 + FS + OKLab"},
-
-        # 行 3: 经典算法 (保留对比)
+        # 行 3: 经典算法
         {"preprocess": 2, "quantize": 3, "dither": 0, "distance_metric": "ciede2000", "label": "经典: Floyd-Steinberg"},
-        {"preprocess": 2, "quantize": 3, "dither": 1, "distance_metric": "ciede2000", "label": "柔和: Atkinson抖动"},
-        {"preprocess": 2, "quantize": 3, "dither": 2, "distance_metric": "ciede2000", "label": "细腻: Sierra抖动"},
+        {"preprocess": 2, "quantize": 3, "dither": 1, "distance_metric": "ciede2000", "label": "柔和: Atkinson"},
+        {"preprocess": 2, "quantize": 3, "dither": 2, "distance_metric": "ciede2000", "label": "细腻: Sierra"},
 
         # 行 4: 风格化/特殊
-        {"preprocess": 0, "quantize": 0, "dither": 3, "distance_metric": "cie76", "label": "卡通: 双边滤波 + 64色"},
+        {"preprocess": 2, "quantize": 3, "dither": 5, "distance_metric": "ciede2000", "label": "像素艺术: Bayer"},
+        {"preprocess": 2, "quantize": 3, "dither": 3, "distance_metric": "oklab", "label": "纯净: 无抖动"},
+        {"preprocess": 0, "quantize": 0, "dither": 7, "distance_metric": "cie76", "label": "卡通: 双边滤波 + 64色"},
     ]
     
     selection_made = Signal(dict)

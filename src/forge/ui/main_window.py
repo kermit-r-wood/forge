@@ -155,12 +155,16 @@ class AlgorithmPanel(QGroupBox):
         dither_layout = QVBoxLayout(dither_group)
         self.dither_combo = SafeComboBox()
         self.dither_combo.addItems([
-            "Floyd-Steinberg (推荐)",  # 0
-            "Atkinson",             # 1
-            "Sierra",               # 2
-            "无抖动",                # 3
-            "Blue Noise (最佳视觉)", # 4
-            "Ordered (Bayer)"       # 5
+            "Floyd-Steinberg",          # 0
+            "Atkinson",                 # 1
+            "Sierra",                   # 2
+            "无抖动",                   # 3
+            "Blue Noise",               # 4
+            "Ordered (Bayer)",          # 5
+            "蛇形 FS (消除条纹)",        # 6
+            "Hilbert 曲线 (推荐)",       # 7
+            "结构感知 (保留边缘)",       # 8
+            "DBS (极致画质/慢)"         # 9
         ])
         dither_layout.addWidget(self.dither_combo)
         layout.addWidget(dither_group)
@@ -381,7 +385,9 @@ class ProcessingThread(QThread):
             self.analyzer.process(
                 self.settings, 
                 self.materials,
-                width_mm=self.output_settings['width_mm']
+                width_mm=self.output_settings['width_mm'],
+                layer_height_mm=self.output_settings['layer_height_mm'],
+                layers=self.output_settings['layers']
             )
             self.finished_signal.emit(self.analyzer.processed)
         except Exception as e:
@@ -487,18 +493,18 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # 帮助菜单
-        help_menu = menubar.addMenu("帮助(&H)")
-        about_action = QAction("关于(&A)", self)
-        about_action.triggered.connect(lambda: QMessageBox.about(self, "关于 Forge", "Forge v0.1.0\n基于 RYBW 叠色原理的多色 3MF 生成器"))
-        help_menu.addAction(about_action)
-
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
         
         calib_action = QAction("材料校准(&C)", self)
         calib_action.triggered.connect(self._show_calibration)
         tools_menu.addAction(calib_action)
+
+        # 帮助菜单
+        help_menu = menubar.addMenu("帮助(&H)")
+        about_action = QAction("关于(&A)", self)
+        about_action.triggered.connect(lambda: QMessageBox.about(self, "关于 Forge", "Forge v0.1.0\n基于 RYBW 叠色原理的多色 3MF 生成器"))
+        help_menu.addAction(about_action)
     
     def _setup_ui(self):
         """设置主界面"""
