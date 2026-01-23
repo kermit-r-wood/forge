@@ -4,7 +4,7 @@ Direct Binary Search (DBS) 抖动实现 (Numba 部分加速)
 用于 "超高画质" 模式
 """
 import numpy as np
-from numba import jit, prange
+from numba import jit
 import cv2
 from .base import BaseDither
 
@@ -49,12 +49,12 @@ def _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w):
     return error
 
 
-@jit(nopython=True, parallel=True, cache=True)
+@jit(nopython=True, cache=True)
 def _initialize_output(target_img, palette, out_img, indices):
-    """初始化输出图像 (并行)"""
+    """初始化输出图像"""
     h, w = target_img.shape[:2]
     
-    for y in prange(h):
+    for y in range(h):
         for x in range(w):
             r = target_img[y, x, 0]
             g = target_img[y, x, 1]
