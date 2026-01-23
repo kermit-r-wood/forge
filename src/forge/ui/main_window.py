@@ -1,0 +1,829 @@
+"""
+Forge 主窗口
+"""
+
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QLabel, QPushButton, QFileDialog, QGroupBox,
+    QComboBox, QSlider, QProgressBar, QSplitter,
+    QScrollArea, QFrame, QCheckBox, QDoubleSpinBox,
+    QTabWidget, QStatusBar, QMenuBar, QMenu, QMessageBox
+)
+from PySide6.QtCore import Qt, Signal, QSize, QThread
+from PySide6.QtGui import QPixmap, QImage, QPalette, QColor, QAction
+from pathlib import Path
+import numpy as np
+import cv2
+import ctypes
+from ctypes import wintypes
+
+from forge.core.analyzer import Analyzer
+from forge.core.exporter import Exporter
+
+class SafeComboBox(QComboBox):
+    """防止误触滚轮的 ComboBox"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+class SafeDoubleSpinBox(QDoubleSpinBox):
+    """防止误触滚轮的 DoubleSpinBox"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+class SafeSlider(QSlider):
+    """防止误触滚轮的 Slider"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+class ImagePreviewWidget(QLabel):
+    """图像预览组件"""
+    
+    def __init__(self, title: str = "预览"):
+        super().__init__()
+        self.title = title
+        self.setMinimumSize(200, 200)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("""
+            QLabel {
+                background-color: #2b2b2b;
+                border: 2px dashed #555;
+                border-radius: 8px;
+                color: #888;
+                font-size: 14px;
+            }
+        """)
+        self.setText(title)
+        self.setScaledContents(False)
+        self._pixmap = None
+    
+    def set_image(self, image_path: str | Path):
+        """设置预览图像 (从文件)"""
+        pixmap = QPixmap(str(image_path))
+        self._set_pixmap(pixmap)
+
+    def set_image_array(self, image_array: np.ndarray):
+        """设置预览图像 (从 numpy array)"""
+        if image_array is None:
+            return
+            
+        height, width, channel = image_array.shape
+        bytes_per_line = 3 * width
+        q_img = QImage(image_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_img)
+        self._set_pixmap(pixmap)
+        
+    def _set_pixmap(self, pixmap):
+        if not pixmap.isNull():
+            self._pixmap = pixmap
+            scaled = pixmap.scaled(
+                self.size(), 
+                Qt.KeepAspectRatio, 
+                Qt.SmoothTransformation
+            )
+            super().setPixmap(scaled)
+    
+    def resizeEvent(self, event):
+        """调整大小时重新缩放图像"""
+        super().resizeEvent(event)
+        if self._pixmap:
+            scaled = self._pixmap.scaled(
+                self.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            super().setPixmap(scaled)
+
+
+class AlgorithmPanel(QGroupBox):
+    """算法选择面板"""
+    
+    def __init__(self):
+        super().__init__("算法设置")
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 预处理算法
+        preprocess_group = QGroupBox("1. 预处理")
+        preprocess_layout = QVBoxLayout(preprocess_group)
+        self.preprocess_combo = SafeComboBox()
+        self.preprocess_combo.addItems([
+            "双边滤波 (推荐)",
+            "引导滤波",
+            "无预处理"
+        ])
+        preprocess_layout.addWidget(self.preprocess_combo)
+        layout.addWidget(preprocess_group)
+        
+        # 量化算法
+        quantize_group = QGroupBox("2. 色彩量化")
+        quantize_layout = QVBoxLayout(quantize_group)
+        self.quantize_combo = SafeComboBox()
+        self.quantize_combo.addItems([
+            "K-Means (推荐)",
+            "中值切割",
+            "八叉树",
+            "无量化 (原色)"
+        ])
+        quantize_layout.addWidget(self.quantize_combo)
+        layout.addWidget(quantize_group)
+        
+        # 抖动算法
+        dither_group = QGroupBox("3. 抖动算法")
+        dither_layout = QVBoxLayout(dither_group)
+        self.dither_combo = SafeComboBox()
+        self.dither_combo.addItems([
+            "Floyd-Steinberg (推荐)",  # 0
+            "Atkinson",             # 1
+            "Sierra",               # 2
+            "无抖动",                # 3
+            "Blue Noise (最佳视觉)", # 4
+            "Ordered (Bayer)"       # 5
+        ])
+        dither_layout.addWidget(self.dither_combo)
+        layout.addWidget(dither_group)
+        
+        # 距离度量
+        metric_group = QGroupBox("4. 颜色匹配度量")
+        metric_layout = QVBoxLayout(metric_group)
+        self.metric_combo = SafeComboBox()
+        # Item data: (label, internal_value)
+        self.metric_map = [
+            ("CIEDE2000 (标准)", "ciede2000"),
+            ("OKLab (感知均匀/推荐)", "oklab"),
+            ("CIE94 (快速)", "cie94"),
+            ("CIE76 (Euclidean)", "cie76"),
+            ("Weighted Euclidean", "weighted")
+        ]
+        for label, _ in self.metric_map:
+            self.metric_combo.addItem(label)
+        # 默认选 OKLab
+        self.metric_combo.setCurrentIndex(1) 
+        metric_layout.addWidget(self.metric_combo)
+        layout.addWidget(metric_group)
+        
+        layout.addStretch()
+    
+    def get_settings(self) -> dict:
+        """获取当前算法设置"""
+        metric_idx = self.metric_combo.currentIndex()
+        metric_val = self.metric_map[metric_idx][1] if 0 <= metric_idx < len(self.metric_map) else "ciede2000"
+        
+        return {
+            "preprocess": self.preprocess_combo.currentIndex(),
+            "quantize": self.quantize_combo.currentIndex(),
+            "dither": self.dither_combo.currentIndex(),
+            "distance_metric": metric_val
+        }
+
+
+class MaterialPanel(QGroupBox):
+    """材料配置面板"""
+    
+    def __init__(self):
+        super().__init__("材料配置")
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Scroll Area for materials
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background-color: transparent; border: none;")
+        
+        container = QWidget()
+        self.materials_layout = QVBoxLayout(container)
+        scroll.setWidget(container)
+        
+        layout.addWidget(scroll)
+        
+        # 默认材料 (纯 RYBW 颜色)
+        initial_materials = [
+            ("白色 PLA", "#FFFFFF", 0.3),
+            ("红色 PLA", "#FF0000", 0.7),
+            ("黄色 PLA", "#FFFF00", 0.6),
+            ("蓝色 PLA", "#0000FF", 0.7),
+        ]
+        
+        self.material_widgets = []
+        
+        for name, color, opacity in initial_materials:
+            self._add_material_row(name, color, opacity)
+            
+
+        
+    def _add_material_row(self, name, color, opacity):
+        row = QFrame()
+        row.setStyleSheet(".QFrame { background-color: #2d2d2d; border-radius: 4px; padding: 4px; margin-bottom: 2px; }")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 颜色指示器
+        color_label = QLabel()
+        color_label.setFixedSize(24, 24)
+        color_label.setStyleSheet(f"""
+            background-color: {color};
+            border: 1px solid #555;
+            border-radius: 4px;
+        """)
+        row_layout.addWidget(color_label)
+        
+        # 信息布局
+        info_layout = QVBoxLayout()
+        name_label = QLabel(name)
+        name_label.setStyleSheet("font-weight: bold;")
+        info_layout.addWidget(name_label)
+        
+        # 透光度滑块
+        slider_layout = QHBoxLayout()
+        opacity_slider = SafeSlider(Qt.Horizontal)
+        opacity_slider.setRange(0, 100)
+        opacity_slider.setValue(int(opacity * 100))
+        
+        opacity_value = QLabel(f"{opacity:.2f}")
+        opacity_value.setFixedWidth(35)
+        
+        slider_layout.addWidget(QLabel("透光:"))
+        slider_layout.addWidget(opacity_slider)
+        slider_layout.addWidget(opacity_value)
+        info_layout.addLayout(slider_layout)
+        
+        row_layout.addLayout(info_layout, 1)
+        
+        # 更新数值显示
+        opacity_slider.valueChanged.connect(
+            lambda v, lbl=opacity_value: lbl.setText(f"{v/100:.2f}")
+        )
+        
+        self.materials_layout.addWidget(row)
+        
+        self.material_widgets.append({
+            "name": name,
+            "color": color,
+            "slider": opacity_slider
+        })
+        
+
+        
+    def get_materials(self) -> list[dict]:
+        """获取材料列表"""
+        materials = []
+        for w in self.material_widgets:
+            materials.append({
+                "name": w["name"],
+                "color": w["color"], # Hex string
+                "opacity": w["slider"].value() / 100.0
+            })
+        return materials
+
+    def set_materials(self, materials_list: list[dict]):
+        """设置材料列表 (清空并重新添加)"""
+        # Clear layout
+        # Remove items from layout backwards
+        while self.materials_layout.count():
+            item = self.materials_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        
+        self.material_widgets = []
+        
+        for mat in materials_list:
+            self._add_material_row(mat['name'], mat['color'], mat['opacity'])
+
+
+class OutputPanel(QGroupBox):
+    """输出设置面板"""
+    
+    def __init__(self):
+        super().__init__("输出设置")
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 输出尺寸
+        size_layout = QHBoxLayout()
+        size_layout.addWidget(QLabel("宽度 (mm):"))
+        self.size_spin = SafeDoubleSpinBox()
+        self.size_spin.setRange(10, 500)
+        self.size_spin.setValue(100)
+        size_layout.addWidget(self.size_spin)
+        layout.addLayout(size_layout)
+        
+        # 层高
+        layer_layout = QHBoxLayout()
+        layer_layout.addWidget(QLabel("层高 (mm):"))
+        self.layer_spin = SafeDoubleSpinBox()
+        self.layer_spin.setRange(0.04, 0.2)
+        self.layer_spin.setValue(0.08)
+        self.layer_spin.setSingleStep(0.02)
+        layer_layout.addWidget(self.layer_spin)
+        layout.addLayout(layer_layout)
+        
+        # 总层数
+        layers_layout = QHBoxLayout()
+        layers_layout.addWidget(QLabel("颜色层数:"))
+        self.layers_spin = SafeDoubleSpinBox()
+        self.layers_spin.setDecimals(0)
+        self.layers_spin.setRange(3, 8)
+        self.layers_spin.setValue(5)
+        layers_layout.addWidget(self.layers_spin)
+        layout.addLayout(layers_layout)
+        
+        layout.addStretch()
+        
+    def get_settings(self) -> dict:
+        return {
+            "width_mm": self.size_spin.value(),
+            "layer_height_mm": self.layer_spin.value(),
+            "layers": int(self.layers_spin.value())
+        }
+
+
+class ProcessingThread(QThread):
+    """后台处理线程"""
+    finished_signal = Signal(object) # 返回 processing result
+    error_signal = Signal(str)
+    
+    def __init__(self, analyzer, settings, materials, output_settings):
+        super().__init__()
+        self.analyzer = analyzer
+        self.settings = settings
+        self.materials = materials
+        self.output_settings = output_settings
+        
+    def run(self):
+        try:
+            self.analyzer.process(
+                self.settings, 
+                self.materials,
+                width_mm=self.output_settings['width_mm']
+            )
+            self.finished_signal.emit(self.analyzer.processed)
+        except Exception as e:
+            self.error_signal.emit(str(e))
+            import traceback
+            traceback.print_exc()
+
+
+class ExportThread(QThread):
+    """后台导出线程"""
+    finished_signal = Signal()
+    error_signal = Signal(str)
+    
+    def __init__(self, exporter, file_path, analyzer, materials, output_settings):
+        super().__init__()
+        self.exporter = exporter
+        self.file_path = file_path
+        self.analyzer = analyzer
+        self.materials = materials
+        self.output_settings = output_settings
+        
+    def run(self):
+        try:
+            layer_data = self.analyzer.get_layer_data()
+            if layer_data is None:
+                raise ValueError("无处理数据")
+                
+            self.exporter.export(
+                self.file_path,
+                layer_data,
+                self.materials,
+                pixel_size_mm=0.4, # 假设喷嘴宽度
+                layer_height_mm=self.output_settings['layer_height_mm']
+            )
+            self.finished_signal.emit()
+        except Exception as e:
+            self.error_signal.emit(str(e))
+            import traceback
+            traceback.print_exc()
+
+
+class MainWindow(QMainWindow):
+    """Forge 主窗口"""
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Forge - 多色 3MF 生成器")
+        self.setMinimumSize(1200, 800)
+        
+        self.analyzer = Analyzer()
+        self.exporter = Exporter()
+        self._current_image_path = None
+        self._process_thread = None
+        self._export_thread = None
+        
+        self._setup_menu()
+        self._setup_ui()
+        self._setup_statusbar()
+        self._apply_dark_theme()
+        self._set_windows_dark_title_bar()
+
+    def _set_windows_dark_title_bar(self):
+        """设置 Windows 10/11 原生黑色标题栏"""
+        try:
+            # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            # DWMWA_MICA_EFFECT = 1029 (Windows 11 only)
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1)
+            
+            # 尝试启用沉浸式暗黑模式 (Win10 1809+ / Win11)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 
+                20, 
+                ctypes.byref(value), 
+                ctypes.sizeof(value)
+            )
+        except Exception:
+            pass # Non-Windows or older version
+
+    def _setup_menu(self):
+        """设置菜单栏"""
+        menubar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menubar.addMenu("文件(&F)")
+        
+        open_action = QAction("打开图片(&O)", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._open_image)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        export_action = QAction("导出 3MF(&E)", self)
+        export_action.setShortcut("Ctrl+E")
+        export_action.triggered.connect(self._export_3mf)
+        file_menu.addAction(export_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("退出(&X)", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # 帮助菜单
+        help_menu = menubar.addMenu("帮助(&H)")
+        about_action = QAction("关于(&A)", self)
+        about_action.triggered.connect(lambda: QMessageBox.about(self, "关于 Forge", "Forge v0.1.0\n基于 RYBW 叠色原理的多色 3MF 生成器"))
+        help_menu.addAction(about_action)
+
+        # 工具菜单
+        tools_menu = menubar.addMenu("工具(&T)")
+        
+        calib_action = QAction("材料校准(&C)", self)
+        calib_action.triggered.connect(self._show_calibration)
+        tools_menu.addAction(calib_action)
+    
+    def _setup_ui(self):
+        """设置主界面"""
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+        
+        # 左侧：图像预览区
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 原始图像预览
+        self.original_preview = ImagePreviewWidget("原始图像")
+        left_layout.addWidget(QLabel("原始图像"))
+        left_layout.addWidget(self.original_preview, 1)
+        
+        # 颜色分离预览
+        self.processed_preview = ImagePreviewWidget("处理结果")
+        left_layout.addWidget(QLabel("处理结果 (Simulated)"))
+        left_layout.addWidget(self.processed_preview, 1)
+        
+        # 右侧：设置面板
+        right_panel = QWidget()
+        right_panel.setFixedWidth(350)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 使用 QScrollArea 替代 TabWidget
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        
+        settings_container = QWidget()
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setContentsMargins(0, 0, 5, 0) # Right padding for scrollbar
+        settings_layout.setSpacing(15)
+        
+        # 算法面板
+        self.algorithm_panel = AlgorithmPanel()
+        settings_layout.addWidget(self.algorithm_panel)
+        
+        # 材料面板
+        self.material_panel = MaterialPanel()
+        self.material_panel.setMinimumHeight(250)
+        settings_layout.addWidget(self.material_panel)
+        
+        # 输出面板
+        self.output_panel = OutputPanel()
+        settings_layout.addWidget(self.output_panel)
+        
+        settings_layout.addStretch()
+        
+        settings_scroll.setWidget(settings_container)
+        right_layout.addWidget(settings_scroll)
+        
+        # 操作按钮
+        btn_layout = QHBoxLayout()
+        
+        self.open_btn = QPushButton("📂 导入图片")
+        self.open_btn.setMinimumHeight(40)
+        self.open_btn.clicked.connect(self._open_image)
+        btn_layout.addWidget(self.open_btn)
+        
+        self.compare_btn = QPushButton("🔍 效果对比")
+        self.compare_btn.setMinimumHeight(40)
+        self.compare_btn.setEnabled(False)
+        self.compare_btn.clicked.connect(self._show_comparison)
+        self.compare_btn.setToolTip("并行计算多种算法组合，选择最佳效果")
+        btn_layout.addWidget(self.compare_btn)
+        
+        right_layout.addLayout(btn_layout)
+        
+        # 第二行按钮
+        btn_layout2 = QHBoxLayout()
+        
+        self.process_btn = QPushButton("🔄 处理图像")
+        self.process_btn.setMinimumHeight(40)
+        self.process_btn.setEnabled(False)
+        self.process_btn.clicked.connect(self._process_image)
+        btn_layout2.addWidget(self.process_btn)
+        
+        self.export_btn = QPushButton("💾 导出 3MF")
+        self.export_btn.setMinimumHeight(40)
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self._export_3mf)
+        btn_layout2.addWidget(self.export_btn)
+        
+        right_layout.addLayout(btn_layout2)
+        
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 0) # Indeterminate
+        right_layout.addWidget(self.progress_bar)
+        
+        # 使用分割器
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        
+        main_layout.addWidget(splitter)
+        
+    def closeEvent(self, event):
+        """窗口关闭事件，清理线程"""
+        if self._process_thread and self._process_thread.isRunning():
+            self._process_thread.terminate()
+            self._process_thread.wait()
+        
+        if self._export_thread and self._export_thread.isRunning():
+            self._export_thread.terminate()
+            self._export_thread.wait()
+            
+        super().closeEvent(event)
+    
+    def _setup_statusbar(self):
+        """设置状态栏"""
+        self.statusBar().showMessage("就绪")
+    
+    def _apply_dark_theme(self):
+        """应用深色主题"""
+        self.setStyleSheet("""
+            QMainWindow { background-color: #1e1e1e; }
+            QWidget { background-color: #1e1e1e; color: #e0e0e0; font-family: "Segoe UI", sans-serif; }
+            QGroupBox { font-weight: bold; border: 1px solid #3c3c3c; border-radius: 6px; margin-top: 12px; padding-top: 10px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+            QPushButton { background-color: #0078d4; border: none; border-radius: 4px; padding: 8px 16px; color: white; font-weight: bold; }
+            QPushButton:hover { background-color: #1e8ae6; }
+            QPushButton:pressed { background-color: #006cbd; }
+            QPushButton:disabled { background-color: #3c3c3c; color: #666; }
+            QComboBox { background-color: #2d2d2d; border: 1px solid #3c3c3c; border-radius: 4px; padding: 5px; }
+            QSlider::groove:horizontal { height: 6px; background: #3c3c3c; border-radius: 3px; }
+            QSlider::handle:horizontal { width: 16px; height: 16px; margin: -5px 0; background: #0078d4; border-radius: 8px; }
+            QTabWidget::pane { border: 1px solid #3c3c3c; }
+            QTabBar::tab { background-color: #2d2d2d; padding: 8px 16px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+            QTabBar::tab:selected { background-color: #1e1e1e; border-bottom: 2px solid #0078d4; }
+            QSpinBox, QDoubleSpinBox { background-color: #2d2d2d; border: 1px solid #3c3c3c; padding: 5px; }
+            QStatusBar { background-color: #007acc; color: white; }
+            QMenuBar { 
+                background-color: #1e1e1e; 
+                border-bottom: 1px solid #3c3c3c;
+                color: #e0e0e0;
+            }
+            QMenuBar::item {
+                background-color: transparent;
+                padding: 8px 12px;
+                border-radius: 4px;
+            }
+            QMenuBar::item:selected { 
+                background-color: #3c3c3c; 
+            }
+            QMenu { 
+                background-color: #2d2d2d; 
+                border: 1px solid #3c3c3c; 
+                padding: 5px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected { 
+                background-color: #0078d4; 
+                color: white;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3c3c3c;
+                margin: 5px 0;
+            }
+            QLabel { background-color: transparent; }
+            QScrollArea { background-color: transparent; }
+        """)
+        
+    def _open_image(self):
+        """打开图片文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择图片",
+            "",
+            "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif);;所有文件 (*.*)"
+        )
+        if file_path:
+            self._current_image_path = file_path
+            self.original_preview.set_image(file_path)
+            self.process_btn.setEnabled(True)
+            self.compare_btn.setEnabled(True)  # 启用效果对比按钮
+            try:
+                self.analyzer.load_image(file_path)
+                self.statusBar().showMessage(f"已加载: {Path(file_path).name}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"无法加载图像: {e}")
+    
+    def _show_comparison(self):
+        """显示效果对比对话框"""
+        if self.analyzer.image is None:
+            return
+        
+        from forge.ui.comparison_dialog import ComparisonDialog
+        
+        materials = self.material_panel.get_materials()
+        output_settings = self.output_panel.get_settings()
+        
+        dialog = ComparisonDialog(
+            self.analyzer.image,
+            materials,
+            output_settings['width_mm'],
+            self
+        )
+        dialog.selection_made.connect(self._on_comparison_selected)
+        dialog.exec()
+    
+    def _on_comparison_selected(self, settings):
+        """用户从对比中选择了算法组合"""
+        # 更新算法面板的选择
+        self.algorithm_panel.preprocess_combo.setCurrentIndex(settings.get('preprocess', 0))
+        self.algorithm_panel.quantize_combo.setCurrentIndex(settings.get('quantize', 0))
+        self.algorithm_panel.dither_combo.setCurrentIndex(settings.get('dither', 0))
+        
+        # 更新距离度量
+        metric_val = settings.get('distance_metric', 'ciede2000')
+        # 查找对应索引
+        index = 0
+        for i, (_, val) in enumerate(self.algorithm_panel.metric_map):
+            if val == metric_val:
+                index = i
+                break
+        self.algorithm_panel.metric_combo.setCurrentIndex(index)
+        
+        # 自动执行处理
+        self._process_image()
+    
+    
+    def _process_image(self):
+        """处理图像"""
+        if not self._current_image_path:
+            return
+        
+        self.statusBar().showMessage("正在处理图像...")
+        self.progress_bar.setVisible(True)
+        self.process_btn.setEnabled(False)
+        self.open_btn.setEnabled(False)
+        
+        # 收集参数
+        algo_settings = self.algorithm_panel.get_settings()
+        materials = self.material_panel.get_materials()
+        output_settings = self.output_panel.get_settings()
+        
+        # 启动线程
+        self._process_thread = ProcessingThread(self.analyzer, algo_settings, materials, output_settings)
+        self._process_thread.finished_signal.connect(self._on_process_finished)
+        self._process_thread.error_signal.connect(self._on_process_error)
+        self._process_thread.start()
+        
+    def _on_process_finished(self, processed_image):
+        self.progress_bar.setVisible(False)
+        self.process_btn.setEnabled(True)
+        self.open_btn.setEnabled(True)
+        self.export_btn.setEnabled(True)
+        
+        if processed_image is not None:
+            self.processed_preview.set_image_array(processed_image)
+            self.statusBar().showMessage("处理完成")
+            
+    def _on_process_error(self, error_msg):
+        self.progress_bar.setVisible(False)
+        self.process_btn.setEnabled(True)
+        self.open_btn.setEnabled(True)
+        QMessageBox.critical(self, "处理错误", f"图像处理失败: {error_msg}")
+        self.statusBar().showMessage("处理失败")
+    
+    def _export_3mf(self):
+        """导出 3MF 文件"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 3MF",
+            "output.3mf",
+            "3MF 文件 (*.3mf)"
+        )
+        if file_path:
+            self.statusBar().showMessage(f"正在导出: {Path(file_path).name}...")
+            self.progress_bar.setVisible(True)
+            self.export_btn.setEnabled(False)
+            
+            materials = self.material_panel.get_materials()
+            
+            # Use thread
+            self._export_thread = ExportThread(
+                self.exporter, file_path, self.analyzer, materials, self.output_panel.get_settings()
+            )
+            self._export_thread.finished_signal.connect(self._on_export_finished)
+            self._export_thread.error_signal.connect(self._on_export_error)
+            self._export_thread.start()
+            
+    def _on_export_finished(self):
+        self.progress_bar.setVisible(False)
+        self.export_btn.setEnabled(True)
+        self.statusBar().showMessage("导出完成")
+        QMessageBox.information(self, "成功", "3MF 文件导出成功！")
+        
+    def _on_export_error(self, error_msg):
+        self.progress_bar.setVisible(False)
+        self.export_btn.setEnabled(True)
+        QMessageBox.critical(self, "导出错误", f"导出失败: {error_msg}")
+        self.statusBar().showMessage("导出失败")
+
+    def _show_calibration(self):
+        """显示材料校准对话框"""
+        from forge.ui.calibration_dialog import CalibrationDialog
+        
+        current_materials = self.material_panel.get_materials()
+        dialog = CalibrationDialog(current_materials, self)
+        
+        # 连接信号：当求解器计算出新参数时更新主界面
+        dialog.materials_updated.connect(self._on_materials_calibrated)
+        
+        dialog.exec()
+
+    def _on_materials_calibrated(self, new_materials):
+        """应用校准后的材料参数"""
+        self.material_panel.set_materials(new_materials)
+        self.statusBar().showMessage("已应用新的材料校准参数")
+        QMessageBox.information(self, "校准完成", "材料参数已更新！\n现在您可以重新处理图像以查看新效果。")
