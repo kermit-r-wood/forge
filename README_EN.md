@@ -6,6 +6,13 @@
 
 Forge is an FDM-based multi-color printing generator using color layering. It leverages the translucency of FDM filaments to achieve rich color expression with a limited number of filament colors by precisely calculating the color mixing effects of different layered colors.
 
+![Introduction](doc/intro_en.png)
+
+## Features
+
+*   **Local Execution**: Built with PySide, runs directly locally.
+*   **No Deployment**: Ready to use without any deployment.
+
 ## Download
 
 Please visit the [Releases](../../releases) page to download the latest portable package.
