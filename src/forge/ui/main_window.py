@@ -132,7 +132,8 @@ class AlgorithmPanel(QGroupBox):
         self.preprocess_combo.addItems([
             "双边滤波 (推荐)",
             "引导滤波",
-            "无预处理"
+            "无预处理",
+            "锐化"
         ])
         preprocess_layout.addWidget(self.preprocess_combo)
         layout.addWidget(preprocess_group)
@@ -188,6 +189,22 @@ class AlgorithmPanel(QGroupBox):
         metric_layout.addWidget(self.metric_combo)
         layout.addWidget(metric_group)
         
+        # 矢量化模式
+        vectorize_group = QGroupBox("5. 矢量化模式")
+        vectorize_layout = QVBoxLayout(vectorize_group)
+        self.vectorize_combo = SafeComboBox()
+        self.vectorize_combo.addItems([
+            "关闭 (使用抖动)",         # 0
+            "Color-Traced (推荐)",    # 1
+            "VTracer (可选)"           # 2
+        ])
+        self.vectorize_combo.setToolTip(
+            "矢量化模式适用于动漫/插画/Logo 等扁平风格图像\n"
+            "启用后将跳过量化和抖动，使用轮廓提取填充"
+        )
+        vectorize_layout.addWidget(self.vectorize_combo)
+        layout.addWidget(vectorize_group)
+        
         layout.addStretch()
     
     def get_settings(self) -> dict:
@@ -199,7 +216,8 @@ class AlgorithmPanel(QGroupBox):
             "preprocess": self.preprocess_combo.currentIndex(),
             "quantize": self.quantize_combo.currentIndex(),
             "dither": self.dither_combo.currentIndex(),
-            "distance_metric": metric_val
+            "distance_metric": metric_val,
+            "vectorize": self.vectorize_combo.currentIndex()
         }
 
 
@@ -334,7 +352,7 @@ class OutputPanel(QGroupBox):
         size_layout.addWidget(QLabel("宽度 (mm):"))
         self.size_spin = SafeDoubleSpinBox()
         self.size_spin.setRange(10, 500)
-        self.size_spin.setValue(100)
+        self.size_spin.setValue(200)
         size_layout.addWidget(self.size_spin)
         layout.addLayout(size_layout)
         
@@ -728,6 +746,9 @@ class MainWindow(QMainWindow):
         self.algorithm_panel.preprocess_combo.setCurrentIndex(settings.get('preprocess', 0))
         self.algorithm_panel.quantize_combo.setCurrentIndex(settings.get('quantize', 0))
         self.algorithm_panel.dither_combo.setCurrentIndex(settings.get('dither', 0))
+        
+        # 更新矢量化模式
+        self.algorithm_panel.vectorize_combo.setCurrentIndex(settings.get('vectorize', 0))
         
         # 更新距离度量
         metric_val = settings.get('distance_metric', 'ciede2000')

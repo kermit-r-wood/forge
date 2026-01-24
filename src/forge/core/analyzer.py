@@ -22,6 +22,8 @@ from .dithering.riemersma import RiemersmaDither
 from .dithering.structure_aware import StructureAwareDither
 from .dithering.dbs import DBSDither
 from .color_model import ColorModel
+from .vectorizers.color_traced import ColorTracedVectorizer
+from .vectorizers.vtracer_wrapper import VTracerVectorizer
 
 class Analyzer:
     """图像分析控制器"""
@@ -57,6 +59,12 @@ class Analyzer:
             7: RiemersmaDither(),        # Hilbert 曲线
             8: StructureAwareDither(),   # 结构感知
             9: DBSDither()               # DBS 极致画质
+        }
+        # 矢量化处理器
+        self.vectorizers = {
+            0: None,                      # 不使用矢量化
+            1: ColorTracedVectorizer(),   # Color-Traced (推荐)
+            2: VTracerVectorizer()        # VTracer (可选)
         }
         
     def _update_dither_settings(self, metric: str):
@@ -114,51 +122,54 @@ class Analyzer:
         filter_algo = self.filters.get(filter_idx)
         if filter_algo:
             current_img = filter_algo.apply(current_img)
-            
-        # 4. 色彩量化 (Reduction) - 可选
-        # 如果我们直接抖动到 1024 色，可能不需要这一步减少颜色
-        # 但 UI 既然提供了 Quantizer，我们先量化到较少的颜色(如 64 色)，再抖动到 1024 色?
-        # 或者 Quantizer 只是用来生成 palette? 但我们已经有固定的 RYBW palette 了。
-        # 这里的 Quantizer 选项可能用于 "风格化" (Posterization)
-        # 让我们把 Quantizer 用于预处理：减少颜色数量，使其更像卡通/插画
-        quant_idx = settings.get('quantize', 0)
-        quant_algo = self.quantizers.get(quant_idx)
-        if quant_algo:
-            # 量化到多少色? 比如 64 色，增加颜色数量以保留更多细节
-            current_img, _ = quant_algo.quantize(current_img, n_colors=64)
-            
-        # 5. 抖动映射 (Dither to Target Palette)
-        # 5. 抖动映射 (Dither to Target Palette)
-        dither_idx = settings.get('dither', 0)
-        dither_algo = self.dithers.get(dither_idx)
         
         # 获取距离度量设置
         distance_metric = settings.get('distance_metric', 'cie76')
         self._update_dither_settings(distance_metric)
         
-        if dither_algo:
-            # 使用 Dither 算法得到视觉图像
-            # BaseDither 现在会使用正确的距离度量
-            processed_rgb = dither_algo.apply(current_img, palette)
+        # 4. 检查是否使用矢量化模式
+        vectorize_idx = settings.get('vectorize', 0)
+        vectorizer = self.vectorizers.get(vectorize_idx)
+        
+        if vectorizer:
+            # 使用矢量化处理 (跳过量化和抖动)
+            processed_rgb, indices = vectorizer.apply(current_img, palette)
             self.processed = processed_rgb
-            
-            # 6. 生成 Index Map (用于 3MF 生成)
-            # 使用相同的高级匹配算法生成索引
-            if distance_metric == 'cie76':
-                indices = self._match_colors_lab(processed_rgb, palette, target_h, target_w)
-            else:
-                indices = self._match_colors_advanced(processed_rgb, palette, target_h, target_w, distance_metric)
             self.indices = indices
-            
         else:
-            # 无抖动，直接匹配
-            if distance_metric == 'cie76':
-                indices = self._match_colors_lab(current_img, palette, target_h, target_w)
-            else:
-                indices = self._match_colors_advanced(current_img, palette, target_h, target_w, distance_metric)
+            # 传统处理流程: 量化 + 抖动
+            
+            # 4a. 色彩量化 (Reduction) - 可选
+            quant_idx = settings.get('quantize', 0)
+            quant_algo = self.quantizers.get(quant_idx)
+            if quant_algo:
+                current_img, _ = quant_algo.quantize(current_img, n_colors=64)
                 
-            self.indices = indices
-            self.processed = palette[self.indices]
+            # 4b. 抖动映射 (Dither to Target Palette)
+            dither_idx = settings.get('dither', 0)
+            dither_algo = self.dithers.get(dither_idx)
+            
+            if dither_algo:
+                # 使用 Dither 算法得到视觉图像
+                processed_rgb = dither_algo.apply(current_img, palette)
+                self.processed = processed_rgb
+                
+                # 生成 Index Map (用于 3MF 生成)
+                if distance_metric == 'cie76':
+                    indices = self._match_colors_lab(processed_rgb, palette, target_h, target_w)
+                else:
+                    indices = self._match_colors_advanced(processed_rgb, palette, target_h, target_w, distance_metric)
+                self.indices = indices
+                
+            else:
+                # 无抖动，直接匹配
+                if distance_metric == 'cie76':
+                    indices = self._match_colors_lab(current_img, palette, target_h, target_w)
+                else:
+                    indices = self._match_colors_advanced(current_img, palette, target_h, target_w, distance_metric)
+                    
+                self.indices = indices
+                self.processed = palette[self.indices]
 
     def _match_colors_lab(self, image: np.ndarray, palette: np.ndarray, h: int, w: int) -> np.ndarray:
         """使用 LAB 色彩空间进行颜色匹配"""

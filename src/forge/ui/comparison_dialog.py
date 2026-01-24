@@ -231,37 +231,29 @@ class ComparisonWorker(QThread):
         
         completed = 0
         
-        # 使用 shutdown(wait=False, cancel_futures=True) 在 Python 3.9+
-        # 但为了兼容性，我们手动处理
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        
-        try:
-            futures = {}
-            for combo in to_process:
-                if self._check_cancelled():
-                    break
-                future = self.executor.submit(self._process_single, combo)
-                futures[future] = combo
+        # 顺序执行以确保稳定性 (避免多线程下的C++扩展冲突)
+        for combo in to_process:
+            if self._check_cancelled():
+                break
+                
+            try:
+                # 直接调用 _process_single
+                result = self._process_single(combo)
+                
+                if result is not None:
+                    self.result_ready.emit(combo["label"], result)
+                    
+            except Exception as e:
+                print(f"Error processing {combo}: {e}")
             
-            for future in as_completed(futures):
-                if self._check_cancelled():
-                    break
-                
-                combo = futures[future]
-                try:
-                    result = future.result()
-                    if result is not None:
-                        self.result_ready.emit(combo["label"], result)
-                except Exception as e:
-                    print(f"Error processing {combo}: {e}")
-                
-                completed += 1
-                self.progress.emit(completed, total)
-                
-        finally:
-            # 确保 executor 关闭
-            self.executor.shutdown(wait=True)
-            self.finished_all.emit()
+            completed += 1
+            self.progress_bar_signal_hack(completed, total)
+        
+        self.finished_all.emit()
+    
+    def progress_bar_signal_hack(self, completed, total):
+        # 避免在非主线程直接更新 UI
+        self.progress.emit(completed, total)
 
     def _check_cancelled(self):
         self._mutex.lock()
@@ -273,8 +265,6 @@ class ComparisonWorker(QThread):
         """处理单个算法组合"""
         try:
             # Check cancellation inside the task
-            # Note: This checks global cancellation, but passing 'self' to worker is tricky if pickling needed
-            # Since threads share memory, it's fine.
             if self._check_cancelled():
                 return None
                 
@@ -282,37 +272,43 @@ class ComparisonWorker(QThread):
             analyzer = Analyzer()
             analyzer.image = self.image.copy()
             analyzer.process(settings, self.materials, width_mm=self.width_mm)
+            if analyzer.processed is None:
+                raise ValueError("Analyzer returned None result")
             return analyzer.processed
         except Exception as e:
-            print(f"Process error: {e}")
+            print(f"Process error for {settings.get('label')}: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            # Return red error image
+            h, w = self.image.shape[:2] # This is original size, need to respect resize?
+            # Analyzer resizes internally. We should probably return None or handle scaling.
+            # But PreviewThumbnail handles scaling.
+            err_img = np.zeros((100, 100, 3), dtype=np.uint8)
+            err_img[:, :] = [255, 0, 0] # Red
+            return err_img
 
 
 class ComparisonDialog(QDialog):
     """算法比较对话框"""
     
     COMBINATIONS = [
-        # 行 1: 新算法 (推荐)
-        {"preprocess": 2, "quantize": 3, "dither": 7, "distance_metric": "oklab", "label": "🌟 Hilbert曲线 + OKLab (推荐)"},
-        {"preprocess": 2, "quantize": 3, "dither": 8, "distance_metric": "oklab", "label": "🎯 结构感知 + OKLab"},
-        {"preprocess": 2, "quantize": 3, "dither": 6, "distance_metric": "oklab", "label": "蛇形FS + OKLab"},
+        # === 量化算法对比 (固定: 无预处理 + Hilbert抖动) ===
+        {"preprocess": 2, "quantize": 0, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:KMeans | D:Hilbert"},
+        {"preprocess": 2, "quantize": 1, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:中值 | D:Hilbert"},
+        {"preprocess": 2, "quantize": 2, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:八叉树 | D:Hilbert"},
+        {"preprocess": 2, "quantize": 3, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Hilbert"},
         
-        # 行 2: 高质量选项
-        {"preprocess": 2, "quantize": 3, "dither": 9, "distance_metric": "oklab", "label": "💎 DBS极致画质 (慢)"},
-        {"preprocess": 2, "quantize": 3, "dither": 4, "distance_metric": "oklab", "label": "Blue Noise + OKLab"},
-        {"preprocess": 3, "quantize": 3, "dither": 7, "distance_metric": "ciede2000", "label": "锐化 + Hilbert"},
-
-        # 行 3: 经典算法
-        {"preprocess": 2, "quantize": 3, "dither": 0, "distance_metric": "ciede2000", "label": "经典: Floyd-Steinberg"},
-        {"preprocess": 2, "quantize": 3, "dither": 1, "distance_metric": "ciede2000", "label": "柔和: Atkinson"},
-        {"preprocess": 2, "quantize": 3, "dither": 2, "distance_metric": "ciede2000", "label": "细腻: Sierra"},
-
-        # 行 4: 风格化/特殊
-        {"preprocess": 2, "quantize": 3, "dither": 5, "distance_metric": "ciede2000", "label": "像素艺术: Bayer"},
-        {"preprocess": 2, "quantize": 3, "dither": 3, "distance_metric": "oklab", "label": "纯净: 无抖动"},
-        {"preprocess": 0, "quantize": 0, "dither": 7, "distance_metric": "cie76", "label": "卡通: 双边滤波 + 64色"},
+        # === 抖动算法对比 (固定: 无预处理 + 无量化) ===
+        {"preprocess": 2, "quantize": 3, "dither": 0, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:FS"},
+        {"preprocess": 2, "quantize": 3, "dither": 1, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Atkinson"},
+        {"preprocess": 2, "quantize": 3, "dither": 2, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Sierra"},
+        {"preprocess": 2, "quantize": 3, "dither": 3, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:无"},
+        {"preprocess": 2, "quantize": 3, "dither": 4, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:BlueNoise"},
+        {"preprocess": 2, "quantize": 3, "dither": 5, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Bayer"},
+        {"preprocess": 2, "quantize": 3, "dither": 6, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:蛇形FS"},
+        # Hilbert 已在量化组中作为基准展示，此处移除以去重
+        {"preprocess": 2, "quantize": 3, "dither": 8, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:结构感知"},
+        {"preprocess": 2, "quantize": 3, "dither": 9, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:DBS"},
     ]
     
     selection_made = Signal(dict)
@@ -358,12 +354,15 @@ class ComparisonDialog(QDialog):
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
         
         for i, combo in enumerate(self.COMBINATIONS):
-            row, col = i // 3, i % 3
-            thumbnail = PreviewThumbnail(combo, combo["label"])
-            thumbnail.clicked.connect(self._on_thumbnail_clicked)
-            thumbnail.double_clicked.connect(self._on_thumbnail_double_clicked)
-            self.grid_layout.addWidget(thumbnail, row, col)
-            self.thumbnails[combo["label"]] = thumbnail
+            try:
+                row, col = i // 3, i % 3
+                thumbnail = PreviewThumbnail(combo, combo["label"])
+                thumbnail.clicked.connect(self._on_thumbnail_clicked)
+                thumbnail.double_clicked.connect(self._on_thumbnail_double_clicked)
+                self.grid_layout.addWidget(thumbnail, row, col)
+                self.thumbnails[combo["label"]] = thumbnail
+            except Exception as e:
+                print(f"Error creating thumbnail {i}: {e}")
         
         scroll.setWidget(container)
         layout.addWidget(scroll, 1)

@@ -7,7 +7,7 @@ from numba import jit
 from .base import BaseDither
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _hilbert_d2xy(n, d):
     """将 Hilbert 曲线上的位置 d 转换为 (x, y) 坐标"""
     x = 0
@@ -31,7 +31,7 @@ def _hilbert_d2xy(n, d):
     return x, y
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _generate_hilbert_path(size):
     """生成 Hilbert 曲线路径"""
     n = size * size
@@ -43,7 +43,7 @@ def _generate_hilbert_path(size):
     return path
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _find_closest_color_fast(pixel_r, pixel_g, pixel_b, palette):
     """快速查找最近颜色 (Numba JIT)"""
     best_dist = 1e10
@@ -59,7 +59,7 @@ def _find_closest_color_fast(pixel_r, pixel_g, pixel_b, palette):
     return best_idx
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _riemersma_kernel(float_img, palette, out_img, path, weights):
     """Riemersma 抖动核心算法"""
     h, w = float_img.shape[:2]
