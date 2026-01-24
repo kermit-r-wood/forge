@@ -199,7 +199,7 @@ class Analyzer:
         3. 选择最佳匹配
         """
         from scipy.spatial import KDTree
-        from .color_distance import ciede2000_distance, cie94_distance, weighted_lab_distance
+        from .color_distance import ciede2000_distance
         
         # 准备数据
         palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
@@ -250,21 +250,6 @@ class Analyzer:
             # when the target is a light cream color that matches "White+Yellow" in Hue
             # but is slightly darker than the physical filament combination.
             dists_flat = ciede2000_distance(p_flat, c_flat, kL=2.0)
-        elif metric == 'cie94':
-            dists_flat = cie94_distance(p_flat, c_flat)
-        elif metric == 'weighted':
-            # Also adjust weighted distance to prioritize L less
-            dists_flat = weighted_lab_distance(p_flat, c_flat, weights=(0.5, 1.0, 1.0))
-        elif metric == 'oklab':
-            # Use OKLab color space for better perceptual uniformity
-            from .color_distance import rgb_to_oklab, oklab_distance
-            # Convert from LAB back to RGB (approximately), then to OKLab
-            # Better approach: work in OKLab from the start
-            p_oklab = rgb_to_oklab(palette[candidates_indices.flatten()].reshape(-1, 3))
-            img_oklab = rgb_to_oklab(image.astype(np.uint8))
-            flat_oklab = img_oklab.reshape(-1, 3)
-            p_flat_oklab = np.repeat(flat_oklab, K, axis=0)
-            dists_flat = oklab_distance(p_flat_oklab, p_oklab)
         else:
             diff = p_flat - c_flat
             dists_flat = np.sum(diff**2, axis=1)

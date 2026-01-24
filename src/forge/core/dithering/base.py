@@ -60,14 +60,11 @@ class BaseDither(ABC):
         candidates_lab = self._palette_lab[candidates_idx]
         
         # 2. 计算精确距离
-        from ..color_distance import cie94_distance, ciede2000_distance, weighted_lab_distance
+        # 2. 计算精确距离
+        from ..color_distance import ciede2000_distance
         
         if self.distance_metric == 'ciede2000':
             dists = ciede2000_distance(pixel_lab, candidates_lab)
-        elif self.distance_metric == 'cie94':
-            dists = cie94_distance(pixel_lab, candidates_lab)
-        elif self.distance_metric == 'weighted':
-             dists = weighted_lab_distance(pixel_lab, candidates_lab, weights=(2.0, 1.0, 1.0))
         else:
              # Fallback to Euclidean
              diff = candidates_lab - pixel_lab

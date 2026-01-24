@@ -147,7 +147,7 @@ class CalibrationDialog(QDialog):
         solve_btn.clicked.connect(self._run_solver)
         btn_layout.addWidget(solve_btn)
         
-        self.apply_btn = QPushButton("✅ 应用推荐参数")
+        self.apply_btn = QPushButton("✅ 应用参数")
         self.apply_btn.setMinimumHeight(40)
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self._apply_results)
@@ -322,7 +322,7 @@ class CalibrationDialog(QDialog):
             self.optimized_materials = optimized
             
             # Show results
-            text = "计算成功! 推荐参数:\n"
+            text = "计算成功! 参数:\n"
             for m in optimized:
                 text += f"{m['name']}: Opacity={m['opacity']:.2f}, Color={m['color']}\n"
             self.result_label.setText(text)

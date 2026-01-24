@@ -130,7 +130,7 @@ class AlgorithmPanel(QGroupBox):
         preprocess_layout = QVBoxLayout(preprocess_group)
         self.preprocess_combo = SafeComboBox()
         self.preprocess_combo.addItems([
-            "双边滤波 (推荐)",
+            "双边滤波",
             "引导滤波",
             "无预处理",
             "锐化"
@@ -143,7 +143,7 @@ class AlgorithmPanel(QGroupBox):
         quantize_layout = QVBoxLayout(quantize_group)
         self.quantize_combo = SafeComboBox()
         self.quantize_combo.addItems([
-            "K-Means (推荐)",
+            "K-Means",
             "中值切割",
             "八叉树",
             "无量化 (原色)"
@@ -163,7 +163,7 @@ class AlgorithmPanel(QGroupBox):
             "Blue Noise",               # 4
             "Ordered (Bayer)",          # 5
             "蛇形 FS (消除条纹)",        # 6
-            "Hilbert 曲线 (推荐)",       # 7
+            "Hilbert 曲线",       # 7
             "结构感知 (保留边缘)",       # 8
             "DBS (极致画质/慢)"         # 9
         ])
@@ -176,16 +176,12 @@ class AlgorithmPanel(QGroupBox):
         self.metric_combo = SafeComboBox()
         # Item data: (label, internal_value)
         self.metric_map = [
-            ("CIEDE2000 (标准)", "ciede2000"),
-            ("OKLab (感知均匀/推荐)", "oklab"),
-            ("CIE94 (快速)", "cie94"),
-            ("CIE76 (Euclidean)", "cie76"),
-            ("Weighted Euclidean", "weighted")
+            ("CIEDE2000", "ciede2000")
         ]
         for label, _ in self.metric_map:
             self.metric_combo.addItem(label)
-        # 默认选 OKLab
-        self.metric_combo.setCurrentIndex(1) 
+        # 默认选 CIEDE2000
+        self.metric_combo.setCurrentIndex(0) 
         metric_layout.addWidget(self.metric_combo)
         layout.addWidget(metric_group)
         
@@ -195,7 +191,7 @@ class AlgorithmPanel(QGroupBox):
         self.vectorize_combo = SafeComboBox()
         self.vectorize_combo.addItems([
             "关闭 (使用抖动)",         # 0
-            "Color-Traced (推荐)",    # 1
+            "Color-Traced",    # 1
             "VTracer (可选)"           # 2
         ])
         self.vectorize_combo.setToolTip(
