@@ -135,6 +135,7 @@ class AlgorithmPanel(QGroupBox):
             "无预处理",
             "锐化"
         ])
+        self.preprocess_combo.setCurrentIndex(2) # 默认无预处理
         preprocess_layout.addWidget(self.preprocess_combo)
         layout.addWidget(preprocess_group)
         
@@ -148,6 +149,7 @@ class AlgorithmPanel(QGroupBox):
             "八叉树",
             "无量化 (原色)"
         ])
+        self.quantize_combo.setCurrentIndex(3) # 默认无量化
         quantize_layout.addWidget(self.quantize_combo)
         layout.addWidget(quantize_group)
         
@@ -167,6 +169,7 @@ class AlgorithmPanel(QGroupBox):
             "结构感知 (保留边缘)",       # 8
             "DBS (极致画质/慢)"         # 9
         ])
+        self.dither_combo.setCurrentIndex(1) # 默认 Atkinson
         dither_layout.addWidget(self.dither_combo)
         layout.addWidget(dither_group)
         
