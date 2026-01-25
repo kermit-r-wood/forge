@@ -4,26 +4,26 @@
 
 ## Introduction
 
-Forge is an FDM-based multi-color printing generator using color layering. It leverages the translucency of FDM filaments to achieve rich color expression with a limited number of filament colors by precisely calculating the color mixing effects of different layered colors.
+Forge generates multi-color prints for FDM printers using color layering. It uses the natural translucency of filaments to create new colors by stacking standard ones. An algorithm calculates exactly how layers mix to match your target image with the filaments you have.
 
 ![Introduction](doc/intro_en.png)
 
 ## Features
 
-*   **Local Execution**: Built with PySide, runs directly locally.
-*   **No Deployment**: Ready to use without any deployment.
+*   **Runs Locally**: A standalone PySide app that runs on your machine.
+*   **Zero Setup**: Download and run. No servers or complex installation.
 
 ## Download
 
-Please visit the [Releases](../../releases) page to download the latest portable package.
+Get the latest portable version from [Releases](../../releases).
 
 ## Usage
 
-1.  **Import Image**: Drag and drop the image you want to print into the software.
-2.  **Configure Settings**: Set the print size, layer height, and the filament colors to be used.
-3.  **Generate Model**: Click the generate button. The software will calculate the color layering scheme and generate the corresponding 3MF model files.
-4.  **Slice and Print**: Import the generated model into your slicing software to slice and print.
+1.  **Import Image**: Drag your image into the app.
+2.  **Configure Settings**: Set print size, layer height, and pick your filament colors.
+3.  **Generate Model**: Click Generate. Forge calculates the layers and saves a 3MF model.
+4.  **Slice and Print**: Open the 3MF in your slicer and print.
 
 ## Principle
 
-Filaments like PLA/PETG used in FDM printing usually possess some translucency. By controlling the stacking order and thickness of different colored filaments, light from the bottom layers penetrates through the top layers, visually mixing to create new colors. This project uses algorithms to simulate this transmission mixing effect, calculating the optimal filament layering combination for the target image.
+Standard filaments like PLA and PETG are slightly translucent. When you stack different colors, they blend: a thinner red layer over white might look pink. Forge simulates this light transmission to calculate the filament stack needed to reproduce an image.
