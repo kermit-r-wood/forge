@@ -28,12 +28,13 @@ class ColorTracedVectorizer(BaseVectorizer):
         quantized = self._quantize_image(image, self.n_colors)
         
         # 2. 映射到目标调色板
-        indices = self._map_to_palette(quantized, palette)
+        indices_raw = self._map_to_palette(quantized, palette)
         
         # 3. 分层绘制 (大区域先绘制，小区域后绘制)
-        result = self._draw_layers(indices, palette, h, w)
+        # Returns: (smoothed_rgb, smoothed_indices)
+        result, indices_smooth = self._draw_layers(indices_raw, palette, h, w)
         
-        return result, indices
+        return result, indices_smooth
     
     def _quantize_image(self, image: np.ndarray, n_colors: int) -> np.ndarray:
         """使用 K-Means 量化图像颜色"""
@@ -68,9 +69,10 @@ class ColorTracedVectorizer(BaseVectorizer):
         return indices.reshape(h, w)
     
     def _draw_layers(self, indices: np.ndarray, palette: np.ndarray, 
-                     h: int, w: int) -> np.ndarray:
+                     h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
         """分层绘制：按区域面积从大到小"""
-        result = np.zeros((h, w, 3), dtype=np.uint8)
+        result_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        
         unique_indices = np.unique(indices)
         
         # 收集区域信息
@@ -83,6 +85,11 @@ class ColorTracedVectorizer(BaseVectorizer):
         # 按面积从大到小排序
         regions.sort(key=lambda x: x[2], reverse=True)
         
+        # 初始化索引图
+        # 使用最大区域的索引填充背景，防止形态学操作产生的缝隙出现默认值(0)
+        bg_index = regions[0][0] if regions else 0
+        result_indices = np.full((h, w), bg_index, dtype=np.int32)
+        
         # 绘制每个区域
         for palette_idx, mask, _ in regions:
             # 形态学处理去噪
@@ -94,8 +101,12 @@ class ColorTracedVectorizer(BaseVectorizer):
                 mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             
-            # 用调色板颜色填充
-            color = tuple(int(c) for c in palette[palette_idx])
-            cv2.drawContours(result, contours, -1, color, -1)
+            # 1. 绘制 RGB (带抗锯齿，好看)
+            color_rgb = tuple(int(c) for c in palette[palette_idx])
+            cv2.drawContours(result_rgb, contours, -1, color_rgb, -1)
+            
+            # 2. 绘制 Indices (无抗锯齿，数据精确)
+            # 使用 LINE_8 (无抗锯齿，但与默认绘图一致)
+            cv2.drawContours(result_indices, contours, -1, int(palette_idx), -1, lineType=cv2.LINE_8)
         
-        return result
+        return result_rgb, result_indices
