@@ -14,16 +14,21 @@ class CalibrationGenerator:
     
     @staticmethod
     def get_16_color_patches():
-        """Returns the definitions [C, M, Y] for the 16-patch card."""
+        """Returns the definitions [C, M, Y] for the 16-patch card.
+        IMPORTANT: Total layers (C+M+Y) must be <= 5.
+        """
         return [
-            # Row 1: Cyan Gradient
+            # Row 1: Cyan Gradient (1, 3, 5 layers)
             [1, 0, 0], [3, 0, 0], [5, 0, 0], [0, 0, 0],
             # Row 2: Magenta Gradient
-            [0, 1, 0], [0, 3, 0], [0, 5, 0], [2, 2, 2],
+            [0, 1, 0], [0, 3, 0], [0, 5, 0], [1, 1, 1], # [1,1,1] is generic dark grey
             # Row 3: Yellow Gradient
-            [0, 0, 1], [0, 0, 3], [0, 0, 5], [3, 3, 3],
-            # Row 4: Secondary & Black
-            [0, 5, 5], [5, 0, 5], [5, 5, 0], [5, 5, 5]
+            [0, 0, 1], [0, 0, 3], [0, 0, 5], [2, 1, 2], # [2,1,2] = 5 layers
+            # Row 4: Secondary Mixes (Max 5 layers)
+            [0, 2, 3], # Red-ish (2M + 3Y)
+            [3, 0, 2], # Green-ish (3C + 2Y)
+            [2, 3, 0], # Blue-ish (2C + 3M)
+            [1, 2, 2]  # Complex mix (1C + 2M + 2Y)
         ]
         
     @staticmethod
@@ -87,12 +92,17 @@ class CalibrationGenerator:
             while len(stack) < total_layers:
                 stack.append(0)
                 
+            # Truncate if somehow over 5 (should not happen with new patches, but for safety)
             real_stack = stack[:total_layers]
+            
             for l in range(total_layers):
                 layer_data[row, col, l] = real_stack[l]
+        
+        # Generate RGB preview image for vertex colors
+        rgb_image = CalibrationGenerator.generate_preview(materials, patch_defs)
                 
         exporter = Exporter()
-        exporter.export(file_path, layer_data, materials, pixel_size_mm=10.0)
+        exporter.export(file_path, layer_data, materials, pixel_size_mm=10.0, rgb_image=rgb_image)
 
 
 class CalibrationSolver:

@@ -70,43 +70,68 @@ class ColorTracedVectorizer(BaseVectorizer):
     
     def _draw_layers(self, indices: np.ndarray, palette: np.ndarray, 
                      h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
-        """分层绘制：按区域面积从大到小"""
-        result_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        """
+        Post-process indices to remove thin lines ("cantilevers") and small floating islands.
+        Optimized for 3D printing to prevent printer head clogging from small parts.
+        """
+        # Parameters - increased for 3D printing optimization
+        MIN_AREA = 100     # Filter out regions smaller than this (area size) - increased from 25
+        KERNEL_SIZE = 3    # Kernel for morphological opening (removes thin lines < 3px)
+        kernel = np.ones((KERNEL_SIZE, KERNEL_SIZE), np.uint8)
+        kernel_close = np.ones((5, 5), np.uint8)  # Larger kernel for closing
         
+        # 1. Determine Background Index (Most frequent color)
+        # This will be used to fill voids created by filtering
+        counts = np.bincount(indices.flatten())
+        bg_index = np.argmax(counts)
+        
+        # Start with a copy of raw indices
+        result_indices = indices.copy().astype(np.int32)
         unique_indices = np.unique(indices)
         
-        # 收集区域信息
-        regions = []
+        # 2. Filter Process for each color
         for idx in unique_indices:
+            if idx == bg_index:
+                continue
+                
+            # Create binary mask for current color
             mask = (indices == idx).astype(np.uint8) * 255
-            area = np.sum(mask > 0)
-            regions.append((int(idx), mask, area))
-        
-        # 按面积从大到小排序
-        regions.sort(key=lambda x: x[2], reverse=True)
-        
-        # 初始化索引图
-        # 使用最大区域的索引填充背景，防止形态学操作产生的缝隙出现默认值(0)
-        bg_index = regions[0][0] if regions else 0
-        result_indices = np.full((h, w), bg_index, dtype=np.int32)
-        
-        # 绘制每个区域
-        for palette_idx, mask, _ in regions:
-            # 形态学处理去噪
-            kernel = np.ones((2, 2), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
             
-            # 找轮廓
-            contours, _ = cv2.findContours(
-                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
+            # A. Morphological Opening
+            # Removes thin connections and small noise
+            mask_opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             
-            # 1. 绘制 RGB (带抗锯齿，好看)
-            color_rgb = tuple(int(c) for c in palette[palette_idx])
-            cv2.drawContours(result_rgb, contours, -1, color_rgb, -1)
+            # B. Morphological Closing
+            # Fills small holes and connects nearby regions to reduce fragmentation
+            mask_closed = cv2.morphologyEx(mask_opened, cv2.MORPH_CLOSE, kernel_close)
             
-            # 2. 绘制 Indices (无抗锯齿，数据精确)
-            # 使用 LINE_8 (无抗锯齿，但与默认绘图一致)
-            cv2.drawContours(result_indices, contours, -1, int(palette_idx), -1, lineType=cv2.LINE_8)
+            # C. Erosion to remove thin protrusions (followed by dilation to restore size)
+            # This removes thin "fingers" that can cause printer head issues
+            mask_eroded = cv2.erode(mask_closed, kernel, iterations=1)
+            mask_cleaned = cv2.dilate(mask_eroded, kernel, iterations=1)
+            
+            # Identify pixels removed by filtering and set them to background
+            pixels_removed = (mask > 0) & (mask_cleaned == 0)
+            result_indices[pixels_removed] = bg_index
+            
+            # D. Connected Component Analysis
+            # Filter out individual disconnected islands that are too small
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_cleaned, connectivity=8)
+            
+            # Iterate through components (label 0 is background of the mask, ignore it)
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area < MIN_AREA:
+                    # Filter out this small component
+                    component_mask = (labels == i)
+                    result_indices[component_mask] = bg_index
+        
+        # 3. Generate RGB Result
+        # Direct mapping ensures the preview exactly matches the indices
+        result_rgb = palette[result_indices].astype(np.uint8)
+        
+        # Optional: Add anti-aliasing just for the preview (result_rgb)?
+        # For now, let's keep it pixel-perfect to avoid misleading the user 
+        # about what will actually be printed.
         
         return result_rgb, result_indices

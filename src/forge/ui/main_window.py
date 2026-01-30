@@ -431,13 +431,17 @@ class ExportThread(QThread):
             layer_data = self.analyzer.get_layer_data()
             if layer_data is None:
                 raise ValueError("无处理数据")
+            
+            # Get the processed RGB image for vertex colors
+            rgb_image = self.analyzer.processed
                 
             self.exporter.export(
                 self.file_path,
                 layer_data,
                 self.materials,
                 pixel_size_mm=0.4, # 假设喷嘴宽度
-                layer_height_mm=self.output_settings['layer_height_mm']
+                layer_height_mm=self.output_settings['layer_height_mm'],
+                rgb_image=rgb_image
             )
             self.finished_signal.emit()
         except Exception as e:

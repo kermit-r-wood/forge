@@ -169,7 +169,68 @@ class Analyzer:
                     indices = self._match_colors_advanced(current_img, palette, target_h, target_w, distance_metric)
                     
                 self.indices = indices
-                self.processed = palette[self.indices]
+                
+                # Post-process: Clean up indices to avoid slicer warnings
+                # (Removing single pixels and thin lines)
+                self.indices = self._clean_indices(self.indices)
+                self.processed = self.palette[self.indices]
+        
+        # Apply greedy mesh preview to match the exported 3MF
+        self.apply_greedy_mesh_preview()
+
+    def _clean_indices(self, indices: np.ndarray) -> np.ndarray:
+        """
+        Clean up indices map to remove noise and thin lines suitable for 3D printing.
+        Optimized to prevent printer head clogging from small parts.
+        """
+        if indices is None:
+            return None
+            
+        h, w = indices.shape
+        
+        # Parameters - increased for 3D printing optimization
+        MIN_AREA = 100     # Filter out regions smaller than this - increased from 25
+        KERNEL_SIZE = 3    # Kernel for opening
+        kernel = np.ones((KERNEL_SIZE, KERNEL_SIZE), np.uint8)
+        kernel_close = np.ones((5, 5), np.uint8)  # Larger kernel for closing
+        
+        # Determine Background Index
+        counts = np.bincount(indices.flatten())
+        bg_index = np.argmax(counts)
+        
+        result_indices = indices.copy().astype(np.int32)
+        unique_indices = np.unique(indices)
+        
+        for idx in unique_indices:
+            if idx == bg_index:
+                continue
+                
+            mask = (indices == idx).astype(np.uint8) * 255
+            
+            # A. Morphological Opening
+            # Removes thin connections and small noise
+            mask_opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            
+            # B. Morphological Closing
+            # Fills small holes and connects nearby regions to reduce fragmentation
+            mask_closed = cv2.morphologyEx(mask_opened, cv2.MORPH_CLOSE, kernel_close)
+            
+            # C. Erosion to remove thin protrusions (followed by dilation to restore size)
+            # This removes thin "fingers" that can cause printer head issues
+            mask_eroded = cv2.erode(mask_closed, kernel, iterations=1)
+            mask_cleaned = cv2.dilate(mask_eroded, kernel, iterations=1)
+            
+            # Identify pixels removed by filtering and set them to background
+            pixels_removed = (mask > 0) & (mask_cleaned == 0)
+            result_indices[pixels_removed] = bg_index
+            
+            # D. Area Filter
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_cleaned, connectivity=8)
+            for i in range(1, num_labels):
+                if stats[i, cv2.CC_STAT_AREA] < MIN_AREA:
+                    result_indices[labels == i] = bg_index
+                    
+        return result_indices
 
     def _match_colors_lab(self, image: np.ndarray, palette: np.ndarray, h: int, w: int) -> np.ndarray:
         """使用 LAB 色彩空间进行颜色匹配"""
@@ -292,3 +353,60 @@ class Analyzer:
         # result (H, W, 5)
         layer_data = combo_lut[self.indices]
         return layer_data
+
+    def apply_greedy_mesh_preview(self):
+        """
+        应用贪婪网格合并效果到预览图像。
+        
+        This makes the preview match the exported 3MF by filling merged
+        rectangles with the center pixel's color.
+        """
+        if self.processed is None or self.indices is None:
+            return
+        
+        H, W = self.indices.shape
+        result = self.processed.copy()
+        processed_mask = np.zeros((H, W), dtype=bool)
+        
+        # For each unique palette index, apply greedy meshing
+        unique_indices = np.unique(self.indices)
+        
+        for idx in unique_indices:
+            mask = (self.indices == idx)
+            
+            # Apply greedy meshing to this index's pixels
+            for y in range(H):
+                for x in range(W):
+                    if not mask[y, x] or processed_mask[y, x]:
+                        continue
+                    
+                    # Expand right
+                    w = 1
+                    while x + w < W and mask[y, x + w] and not processed_mask[y, x + w]:
+                        w += 1
+                    
+                    # Expand down
+                    h = 1
+                    while y + h < H:
+                        can_extend = True
+                        for dx in range(w):
+                            if not mask[y + h, x + dx] or processed_mask[y + h, x + dx]:
+                                can_extend = False
+                                break
+                        if can_extend:
+                            h += 1
+                        else:
+                            break
+                    
+                    # Get center pixel color
+                    center_y = y + h // 2
+                    center_x = x + w // 2
+                    center_color = self.processed[center_y, center_x]
+                    
+                    # Fill the entire rectangle with center color
+                    for dy in range(h):
+                        for dx in range(w):
+                            result[y + dy, x + dx] = center_color
+                            processed_mask[y + dy, x + dx] = True
+        
+        self.processed = result
