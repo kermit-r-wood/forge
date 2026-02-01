@@ -16,16 +16,26 @@ class Exporter:
         
     def export(self, file_path: str, layer_data: np.ndarray, materials: list[dict], 
                pixel_size_mm: float = 0.4, layer_height_mm: float = 0.08,
-               rgb_image: np.ndarray = None):
+               rgb_image: np.ndarray = None, base_thickness_mm: float = 0.0):
         """
         导出 3MF 文件
         
         Uses greedy meshing to merge adjacent same-material voxels into larger
         rectangles, reducing mesh complexity and creating continuous print paths.
+        
+        Args:
+            file_path: Output 3MF file path
+            layer_data: (H, W, Layers) material index array
+            materials: List of material definitions
+            pixel_size_mm: Horizontal pixel size in mm
+            layer_height_mm: Height per color layer in mm
+            rgb_image: Optional RGB image for vertex colors
+            base_thickness_mm: Thickness of solid base layer (0 = no base)
         """
         # 1. Generate 3D Model XML with greedy meshing
-        model_xml = self._generate_model_xml_greedy(
-            layer_data, materials, pixel_size_mm, layer_height_mm, rgb_image
+        model_xml, object_ids = self._generate_model_xml_greedy(
+            layer_data, materials, pixel_size_mm, layer_height_mm, rgb_image,
+            base_thickness_mm
         )
         
         # 2. Generate [Content_Types].xml
@@ -111,11 +121,16 @@ class Exporter:
 
     def _generate_model_xml_greedy(self, layer_data: np.ndarray, materials: list[dict], 
                                     pixel_size_mm: float, layer_height_mm: float,
-                                    rgb_image: np.ndarray = None) -> str:
+                                    rgb_image: np.ndarray = None,
+                                    base_thickness_mm: float = 0.0) -> tuple[str, list[int]]:
         """
         Generate 3MF model XML using greedy meshing.
         
         For each material, merges adjacent voxels into larger rectangular blocks.
+        If base_thickness_mm > 0, adds a solid base layer underneath.
+        
+        Returns:
+            Tuple of (model_xml_string, object_ids_list)
         """
         H, W, num_layers = layer_data.shape
         
@@ -138,11 +153,85 @@ class Exporter:
         object_ids = []
         current_id = 1
         
-        # Create one object per material
+        # Generate base layer as separate object (at Z=0, below color layers)
+        if base_thickness_mm > 0:
+            base_coords, base_faces, base_colors = self._generate_base_layer(
+                H, W, pixel_size_mm, base_thickness_mm, material_colors[0] if materials else (255, 255, 255)
+            )
+            if len(base_coords) > 0:
+                obj_id = current_id
+                current_id += 1
+                object_ids.append(obj_id)
+                
+                xml_parts.append(f'<object id="{obj_id}" name="base(白)" type="model">')
+                xml_parts.append('<mesh>')
+                xml_parts.append('<vertices>')
+                
+                # Build vertex strings with RGB colors for base
+                vx = base_coords[:, 0]
+                vy = base_coords[:, 1]
+                vz = base_coords[:, 2]
+                vr = base_colors[:, 0].astype(int)
+                vg = base_colors[:, 1].astype(int)
+                vb = base_colors[:, 2].astype(int)
+                
+                s_vx = np.char.mod('%.3f', vx)
+                s_vy = np.char.mod('%.3f', vy)
+                s_vz = np.char.mod('%.3f', vz)
+                s_vr = np.char.mod('%d', vr)
+                s_vg = np.char.mod('%d', vg)
+                s_vb = np.char.mod('%d', vb)
+                
+                v_lines = np.char.add('<vertex x="', s_vx)
+                v_lines = np.char.add(v_lines, '" y="')
+                v_lines = np.char.add(v_lines, s_vy)
+                v_lines = np.char.add(v_lines, '" z="')
+                v_lines = np.char.add(v_lines, s_vz)
+                v_lines = np.char.add(v_lines, '" r="')
+                v_lines = np.char.add(v_lines, s_vr)
+                v_lines = np.char.add(v_lines, '" g="')
+                v_lines = np.char.add(v_lines, s_vg)
+                v_lines = np.char.add(v_lines, '" b="')
+                v_lines = np.char.add(v_lines, s_vb)
+                v_lines = np.char.add(v_lines, '" />')
+                
+                xml_parts.append("".join(v_lines))
+                xml_parts.append('</vertices>')
+                
+                xml_parts.append('<triangles>')
+                
+                # Convert quads to triangles for base
+                i0 = base_faces[:, 0]
+                i1 = base_faces[:, 1]
+                i2 = base_faces[:, 2]
+                i3 = base_faces[:, 3]
+                
+                t1 = np.stack([i0, i2, i1], axis=1)
+                t2 = np.stack([i0, i3, i2], axis=1)
+                tris = np.vstack([t1, t2])
+                
+                t_v1 = np.char.mod('%d', tris[:, 0])
+                t_v2 = np.char.mod('%d', tris[:, 1])
+                t_v3 = np.char.mod('%d', tris[:, 2])
+                
+                t_str = np.char.add('<triangle v1="', t_v1)
+                t_str = np.char.add(t_str, '" v2="')
+                t_str = np.char.add(t_str, t_v2)
+                t_str = np.char.add(t_str, '" v3="')
+                t_str = np.char.add(t_str, t_v3)
+                t_str = np.char.add(t_str, '" />')
+                
+                xml_parts.append("".join(t_str))
+                
+                xml_parts.append('</triangles>')
+                xml_parts.append('</mesh>')
+                xml_parts.append('</object>')
+        
+        # Create one object per material (color layers sit above base)
         for m_idx, mat in enumerate(materials):
             coords, faces, colors = self._generate_greedy_mesh_for_material(
                 layer_data, m_idx, material_colors, pixel_size_mm, layer_height_mm,
-                rgb_image if use_rgb_image else None
+                rgb_image if use_rgb_image else None, base_thickness_mm
             )
             
             if len(coords) == 0:
@@ -227,20 +316,24 @@ class Exporter:
         
         xml_parts.append('</model>')
         
-        return "".join(xml_parts)
+        return "".join(xml_parts), object_ids
 
     def _generate_greedy_mesh_for_material(self, layer_data: np.ndarray, 
                                             m_idx: int,
                                             material_colors: list,
                                             pixel_size_mm: float, 
                                             layer_height_mm: float,
-                                            rgb_image: np.ndarray = None) -> tuple:
+                                            rgb_image: np.ndarray = None,
+                                            base_thickness_mm: float = 0.0) -> tuple:
         """
         Generate mesh for a material using greedy meshing.
         
         For each layer, finds the 2D mask of pixels using this material,
         applies greedy meshing to merge into rectangles, then creates
         3D blocks for each merged rectangle.
+        
+        Args:
+            base_thickness_mm: Z offset for color layers (to sit on top of base)
         """
         H, W, num_layers = layer_data.shape
         
@@ -250,6 +343,11 @@ class Exporter:
         vertex_offset = 0
         
         mat_r, mat_g, mat_b = material_colors[m_idx] if m_idx < len(material_colors) else (255, 255, 255)
+        
+        # Z offset for color layers (base layer is at Z=0, color layers above it)
+        # Layer order is flipped: layer 0 (finest detail) is at top, layer N-1 at bottom
+        # This way, viewing from top shows the detailed color layer
+        z_offset = base_thickness_mm
         
         for z in range(num_layers):
             # Get 2D mask for this material at this layer
@@ -261,8 +359,11 @@ class Exporter:
             # Apply greedy meshing to get merged rectangles
             rectangles = self._greedy_mesh_2d(mask)
             
-            z_base = z * layer_height_mm
-            z_top = (z + 1) * layer_height_mm
+            # Flip layer order: layer 0 is at top, layer (num_layers-1) is at bottom
+            # z_base = base_thickness + (num_layers - 1 - z) * layer_height
+            flipped_z = num_layers - 1 - z
+            z_base = z_offset + flipped_z * layer_height_mm
+            z_top = z_offset + (flipped_z + 1) * layer_height_mm
             
             for (rx, ry, rw, rh) in rectangles:
                 # Convert pixel coordinates to mm
@@ -316,3 +417,97 @@ class Exporter:
         colors = np.vstack(all_colors)
         
         return coords, faces, colors
+
+    def _generate_base_layer(self, H: int, W: int, pixel_size_mm: float, 
+                             base_thickness_mm: float, base_color: tuple) -> tuple:
+        """
+        Generate a solid rectangular base layer covering the entire model footprint.
+        
+        This ensures no floating regions and provides a stable printing foundation.
+        """
+        x_max = W * pixel_size_mm
+        y_max = H * pixel_size_mm
+        z_top = base_thickness_mm
+        
+        r, g, b = base_color
+        
+        # Single rectangular block covering the entire base
+        coords = np.array([
+            [0, 0, 0],
+            [x_max, 0, 0],
+            [x_max, y_max, 0],
+            [0, y_max, 0],
+            [0, 0, z_top],
+            [x_max, 0, z_top],
+            [x_max, y_max, z_top],
+            [0, y_max, z_top],
+        ], dtype=np.float64)
+        
+        # 6 faces as quads
+        faces = np.array([
+            [0, 3, 2, 1],  # Bottom (-Z)
+            [4, 5, 6, 7],  # Top (+Z)
+            [0, 1, 5, 4],  # Front (-Y)
+            [2, 3, 7, 6],  # Back (+Y)
+            [0, 4, 7, 3],  # Left (-X)
+            [1, 2, 6, 5],  # Right (+X)
+        ], dtype=np.int32)
+        
+        colors = np.tile([[r, g, b]], (8, 1)).astype(np.uint8)
+        
+        return coords, faces, colors
+    
+    def _vertices_to_xml(self, coords: np.ndarray, colors: np.ndarray) -> str:
+        """Convert vertex coordinates and colors to XML string."""
+        vx = coords[:, 0]
+        vy = coords[:, 1]
+        vz = coords[:, 2]
+        vr = colors[:, 0].astype(int)
+        vg = colors[:, 1].astype(int)
+        vb = colors[:, 2].astype(int)
+        
+        s_vx = np.char.mod('%.3f', vx)
+        s_vy = np.char.mod('%.3f', vy)
+        s_vz = np.char.mod('%.3f', vz)
+        s_vr = np.char.mod('%d', vr)
+        s_vg = np.char.mod('%d', vg)
+        s_vb = np.char.mod('%d', vb)
+        
+        v_lines = np.char.add('<vertex x="', s_vx)
+        v_lines = np.char.add(v_lines, '" y="')
+        v_lines = np.char.add(v_lines, s_vy)
+        v_lines = np.char.add(v_lines, '" z="')
+        v_lines = np.char.add(v_lines, s_vz)
+        v_lines = np.char.add(v_lines, '" r="')
+        v_lines = np.char.add(v_lines, s_vr)
+        v_lines = np.char.add(v_lines, '" g="')
+        v_lines = np.char.add(v_lines, s_vg)
+        v_lines = np.char.add(v_lines, '" b="')
+        v_lines = np.char.add(v_lines, s_vb)
+        v_lines = np.char.add(v_lines, '" />')
+        
+        return "".join(v_lines)
+    
+    def _faces_to_xml(self, faces: np.ndarray) -> str:
+        """Convert quad faces to triangle XML string."""
+        i0 = faces[:, 0]
+        i1 = faces[:, 1]
+        i2 = faces[:, 2]
+        i3 = faces[:, 3]
+        
+        t1 = np.stack([i0, i2, i1], axis=1)
+        t2 = np.stack([i0, i3, i2], axis=1)
+        tris = np.vstack([t1, t2])
+        
+        t_v1 = np.char.mod('%d', tris[:, 0])
+        t_v2 = np.char.mod('%d', tris[:, 1])
+        t_v3 = np.char.mod('%d', tris[:, 2])
+        
+        t_str = np.char.add('<triangle v1="', t_v1)
+        t_str = np.char.add(t_str, '" v2="')
+        t_str = np.char.add(t_str, t_v2)
+        t_str = np.char.add(t_str, '" v3="')
+        t_str = np.char.add(t_str, t_v3)
+        t_str = np.char.add(t_str, '" />')
+        
+        return "".join(t_str)

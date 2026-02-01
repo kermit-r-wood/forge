@@ -19,6 +19,7 @@ from ctypes import wintypes
 
 from forge.core.analyzer import Analyzer
 from forge.core.exporter import Exporter
+from forge.core.settings import get_settings_manager
 
 class SafeComboBox(QComboBox):
     """防止误触滚轮的 ComboBox"""
@@ -225,6 +226,7 @@ class MaterialPanel(QGroupBox):
     
     def __init__(self):
         super().__init__("材料配置")
+        self._settings = get_settings_manager()
         self._setup_ui()
     
     def _setup_ui(self):
@@ -241,18 +243,13 @@ class MaterialPanel(QGroupBox):
         
         layout.addWidget(scroll)
         
-        # 默认材料 (纯 RYBW 颜色)
-        initial_materials = [
-            ("白色 PLA", "#FFFFFF", 0.3),
-            ("红色 PLA", "#FF0000", 0.7),
-            ("黄色 PLA", "#FFFF00", 0.6),
-            ("蓝色 PLA", "#0000FF", 0.7),
-        ]
+        # Load materials from settings
+        saved_materials = self._settings.get_materials()
         
         self.material_widgets = []
         
-        for name, color, opacity in initial_materials:
-            self._add_material_row(name, color, opacity)
+        for mat in saved_materials:
+            self._add_material_row(mat['name'], mat['color'], mat['opacity'])
             
 
         
@@ -294,10 +291,11 @@ class MaterialPanel(QGroupBox):
         
         row_layout.addLayout(info_layout, 1)
         
-        # 更新数值显示
+        # 更新数值显示并保存设置
         opacity_slider.valueChanged.connect(
             lambda v, lbl=opacity_value: lbl.setText(f"{v/100:.2f}")
         )
+        opacity_slider.valueChanged.connect(self._save_materials)
         
         self.materials_layout.addWidget(row)
         
@@ -308,6 +306,9 @@ class MaterialPanel(QGroupBox):
         })
         
 
+    def _save_materials(self):
+        """Save materials to settings file"""
+        self._settings.set_materials(self.get_materials())
         
     def get_materials(self) -> list[dict]:
         """获取材料列表"""
@@ -334,6 +335,9 @@ class MaterialPanel(QGroupBox):
         
         for mat in materials_list:
             self._add_material_row(mat['name'], mat['color'], mat['opacity'])
+        
+        # Save to settings
+        self._save_materials()
 
 
 class OutputPanel(QGroupBox):
@@ -360,7 +364,7 @@ class OutputPanel(QGroupBox):
         layer_layout.addWidget(QLabel("层高 (mm):"))
         self.layer_spin = SafeDoubleSpinBox()
         self.layer_spin.setRange(0.04, 0.2)
-        self.layer_spin.setValue(0.08)
+        self.layer_spin.setValue(0.1)
         self.layer_spin.setSingleStep(0.02)
         layer_layout.addWidget(self.layer_spin)
         layout.addLayout(layer_layout)
@@ -375,13 +379,25 @@ class OutputPanel(QGroupBox):
         layers_layout.addWidget(self.layers_spin)
         layout.addLayout(layers_layout)
         
+        # 底座厚度
+        base_layout = QHBoxLayout()
+        base_layout.addWidget(QLabel("底座厚度 (mm):"))
+        self.base_spin = SafeDoubleSpinBox()
+        self.base_spin.setRange(0.0, 2.0)
+        self.base_spin.setValue(0.4)
+        self.base_spin.setSingleStep(0.1)
+        self.base_spin.setToolTip("实心底座层厚度，0 表示无底座。\n建议保持 0.4mm 以避免悬空区域和孔洞。")
+        base_layout.addWidget(self.base_spin)
+        layout.addLayout(base_layout)
+        
         layout.addStretch()
         
     def get_settings(self) -> dict:
         return {
             "width_mm": self.size_spin.value(),
             "layer_height_mm": self.layer_spin.value(),
-            "layers": int(self.layers_spin.value())
+            "layers": int(self.layers_spin.value()),
+            "base_thickness_mm": self.base_spin.value()
         }
 
 
@@ -441,7 +457,8 @@ class ExportThread(QThread):
                 self.materials,
                 pixel_size_mm=0.4, # 假设喷嘴宽度
                 layer_height_mm=self.output_settings['layer_height_mm'],
-                rgb_image=rgb_image
+                rgb_image=rgb_image,
+                base_thickness_mm=self.output_settings.get('base_thickness_mm', 0.0)
             )
             self.finished_signal.emit()
         except Exception as e:
