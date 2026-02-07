@@ -1,10 +1,10 @@
 """
-Riemersma 抖动实现 (基于 Hilbert 曲线)
+Riemersma 抖动实现 (基于 Hilbert 曲线) - LAB 色彩空间
 沿空间填充曲线进行误差扩散，消除方向性伪影
 """
 import numpy as np
 from numba import jit
-from .base import BaseDither
+from .base import BaseDither, _find_closest_color_lab, precompute_palette_lab
 
 
 @jit(nopython=True, cache=False)
@@ -44,24 +44,8 @@ def _generate_hilbert_path(size):
 
 
 @jit(nopython=True, cache=False)
-def _find_closest_color_fast(pixel_r, pixel_g, pixel_b, palette):
-    """快速查找最近颜色 (Numba JIT)"""
-    best_dist = 1e10
-    best_idx = 0
-    
-    for i in range(len(palette)):
-        pr, pg, pb = palette[i, 0], palette[i, 1], palette[i, 2]
-        dist = (pixel_r - pr)**2 + (pixel_g - pg)**2 + (pixel_b - pb)**2
-        if dist < best_dist:
-            best_dist = dist
-            best_idx = i
-    
-    return best_idx
-
-
-@jit(nopython=True, cache=False)
-def _riemersma_kernel(float_img, palette, out_img, path, weights):
-    """Riemersma 抖动核心算法"""
+def _riemersma_kernel_lab(float_img, palette_rgb, palette_lab, out_img, path, weights):
+    """Riemersma 抖动核心算法 - 使用 LAB 色彩匹配"""
     h, w = float_img.shape[:2]
     n_path = len(path)
     queue_size = len(weights)
@@ -99,11 +83,11 @@ def _riemersma_kernel(float_img, palette, out_img, path, weights):
         old_g = float_img[y, x, 1] + added_g
         old_b = float_img[y, x, 2] + added_b
         
-        best_idx = _find_closest_color_fast(old_r, old_g, old_b, palette)
+        best_idx = _find_closest_color_lab(old_r, old_g, old_b, palette_lab)
         
-        new_r = palette[best_idx, 0]
-        new_g = palette[best_idx, 1]
-        new_b = palette[best_idx, 2]
+        new_r = palette_rgb[best_idx, 0]
+        new_g = palette_rgb[best_idx, 1]
+        new_b = palette_rgb[best_idx, 2]
         
         out_img[y, x, 0] = int(max(0, min(255, new_r)))
         out_img[y, x, 1] = int(max(0, min(255, new_g)))
@@ -127,7 +111,7 @@ def _riemersma_kernel(float_img, palette, out_img, path, weights):
 
 class RiemersmaDither(BaseDither):
     """
-    Riemersma 抖动 (基于 Hilbert 曲线)
+    Riemersma 抖动 (基于 Hilbert 曲线) - LAB 色彩匹配
     沿空间填充曲线进行误差扩散，无方向性伪影
     """
     
@@ -152,6 +136,9 @@ class RiemersmaDither(BaseDither):
         out_img = np.zeros((h, w, 3), dtype=np.uint8)
         palette_float = palette.astype(np.float64)
         
+        # 预计算 palette 的 LAB 值
+        palette_lab = precompute_palette_lab(palette_float)
+        
         # 获取或生成 Hilbert 路径
         hilbert_size = self._get_hilbert_size(w, h)
         cache_key = hilbert_size
@@ -165,6 +152,6 @@ class RiemersmaDither(BaseDither):
         queue_size = 16
         weights = np.array([2.0 ** (-(i / 4.0)) for i in range(queue_size)], dtype=np.float64)
         
-        _riemersma_kernel(float_img, palette_float, out_img, path, weights)
+        _riemersma_kernel_lab(float_img, palette_float, palette_lab, out_img, path, weights)
                         
         return out_img

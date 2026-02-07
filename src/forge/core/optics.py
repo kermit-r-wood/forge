@@ -1,8 +1,44 @@
 """
 光学计算模块 - 改进版
 使用基于物理的减色混合模型
+
+Optical parameters can be calibrated using the CalibrationSolver.
 """
 import numpy as np
+
+# === Configurable Optical Model Parameters ===
+# These can be optimized by the calibration solver to match actual print results.
+# Default values are optimized for solid background (reflected light) viewing.
+
+# Absorption factor: Controls color absorption strength (0.0 = no absorption, 1.0 = full Beer-Lambert)
+ABSORPTION_FACTOR = 0.5
+
+# Scatter contribution: Controls how much material color tints the light (0.0 = none, 1.0 = full)  
+SCATTER_CONTRIBUTION = 0.5
+
+# Scatter blend: Controls mixing ratio of transmitted vs scattered light (0.0 = all transmitted, 1.0 = all scattered)
+SCATTER_BLEND = 0.15
+
+
+def get_optical_params() -> dict:
+    """Get current optical model parameters."""
+    return {
+        'absorption_factor': ABSORPTION_FACTOR,
+        'scatter_contribution': SCATTER_CONTRIBUTION,
+        'scatter_blend': SCATTER_BLEND
+    }
+
+
+def set_optical_params(absorption_factor: float = None, scatter_contribution: float = None, scatter_blend: float = None):
+    """Set optical model parameters globally."""
+    global ABSORPTION_FACTOR, SCATTER_CONTRIBUTION, SCATTER_BLEND
+    if absorption_factor is not None:
+        ABSORPTION_FACTOR = absorption_factor
+    if scatter_contribution is not None:
+        SCATTER_CONTRIBUTION = scatter_contribution
+    if scatter_blend is not None:
+        SCATTER_BLEND = scatter_blend
+
 
 def parse_color(color) -> tuple:
     """解析颜色：支持十六进制字符串和 RGB 元组"""
@@ -16,7 +52,13 @@ def parse_color(color) -> tuple:
     return tuple(color)
 
 
-def calculate_transmitted_color(layers: list[dict], light_source: tuple = (255, 255, 255)) -> np.ndarray:
+def calculate_transmitted_color(
+    layers: list[dict], 
+    light_source: tuple = (255, 255, 255),
+    absorption_factor: float = None,
+    scatter_contribution: float = None,
+    scatter_blend: float = None
+) -> np.ndarray:
     """
     计算光线穿过多层半透明材料后的颜色
     
@@ -28,8 +70,16 @@ def calculate_transmitted_color(layers: list[dict], light_source: tuple = (255, 
     
     :param layers: 材料层列表
     :param light_source: 光源颜色 RGB (默认白光)
+    :param absorption_factor: Absorption strength (None = use global default)
+    :param scatter_contribution: Scatter color contribution (None = use global default)
+    :param scatter_blend: Scatter/transmission blend ratio (None = use global default)
     :return: 透射光颜色 RGB (uint8)
     """
+    # Use global defaults if not specified
+    abs_factor = absorption_factor if absorption_factor is not None else ABSORPTION_FACTOR
+    scat_contrib = scatter_contribution if scatter_contribution is not None else SCATTER_CONTRIBUTION
+    scat_blend = scatter_blend if scatter_blend is not None else SCATTER_BLEND
+    
     # 初始光强 (归一化到 0-1)
     current_light = np.array(light_source, dtype=np.float64) / 255.0
     
@@ -50,36 +100,23 @@ def calculate_transmitted_color(layers: list[dict], light_source: tuple = (255, 
         # opacity 代表标准厚度下的散射率
         scatter = 1.0 - (1.0 - opacity) ** (thickness / ref_thickness)
         
-        # === 改进的光学模型 ===
-        # 
-        # 当光线穿过材料时，发生两件事：
-        # 1. 吸收 (Absorption): 材料吸收其互补色的光
-        # 2. 散射 (Scattering): 部分光被散射，与材料颜色混合
-        #
-        # 透射系数 = 材料颜色 / 255 (白色=1表示完全透过)
-        # 散射贡献 = 材料颜色 * 散射率 * 入射光强度
-        
+        # === 光学模型 ===
         # 透射分量：光线穿过材料时被选择性吸收
         # 吸收系数 = 1 - (material_color)，即材料颜色的互补色
-        # 例如：蓝色材料 (0,0,1) 的吸收系数 = (1,1,0)，吸收红和绿
         absorption_coeff = 1.0 - material_color
         
-        # 应用 Beer-Lambert 定律的简化形式
-        # 透射率 = exp(-absorption * opacity * thickness_factor)
-        # 使用近似：透射率 ≈ 1 - absorption * effective_opacity
-        effective_absorption = absorption_coeff * scatter
-        transmission = 1.0 - effective_absorption
-        transmission = np.clip(transmission, 0, 1)
+        # 应用 Beer-Lambert 定律 (指数衰减)
+        # absorption_factor controls the absorption strength
+        transmission = np.exp(-absorption_coeff * scatter * abs_factor)
         
         # 散射分量：部分光被材料散射并染上材料颜色
-        # 散射光强度与入射光和材料颜色成正比
-        scattered_light = material_color * scatter * np.mean(current_light)
+        # scatter_contribution controls the color tinting strength
+        scattered_light = material_color * scatter * scat_contrib * np.mean(current_light)
         
         # 组合透射光和散射光
-        # 透射光 = 当前光 * 透射率
-        # 最终输出 = 透射光 * (1 - scatter) + 散射光
+        # scatter_blend controls the mixing ratio
         transmitted_light = current_light * transmission
-        current_light = transmitted_light * (1 - scatter * 0.3) + scattered_light * 0.3
+        current_light = transmitted_light * (1 - scatter * scat_blend) + scattered_light * scat_blend
         
         # 确保不超过 1
         current_light = np.clip(current_light, 0, 1)

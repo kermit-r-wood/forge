@@ -16,7 +16,8 @@ class Exporter:
         
     def export(self, file_path: str, layer_data: np.ndarray, materials: list[dict], 
                pixel_size_mm: float = 0.4, layer_height_mm: float = 0.08,
-               rgb_image: np.ndarray = None, base_thickness_mm: float = 0.0):
+               rgb_image: np.ndarray = None, base_thickness_mm: float = 0.0,
+               invert_z: bool = False, greedy_mesh: bool = True):
         """
         导出 3MF 文件
         
@@ -31,12 +32,20 @@ class Exporter:
             layer_height_mm: Height per color layer in mm
             rgb_image: Optional RGB image for vertex colors
             base_thickness_mm: Thickness of solid base layer (0 = no base)
+            greedy_mesh: If True, use greedy meshing to merge adjacent voxels.
+                         If False, generate individual cubes per pixel (like LD_ColorLayering).
         """
-        # 1. Generate 3D Model XML with greedy meshing
-        model_xml, object_ids = self._generate_model_xml_greedy(
-            layer_data, materials, pixel_size_mm, layer_height_mm, rgb_image,
-            base_thickness_mm
-        )
+        # 1. Generate 3D Model XML
+        if greedy_mesh:
+            model_xml, object_ids = self._generate_model_xml_greedy(
+                layer_data, materials, pixel_size_mm, layer_height_mm, rgb_image,
+                base_thickness_mm, invert_z
+            )
+        else:
+            model_xml, object_ids = self._generate_model_xml_per_pixel(
+                layer_data, materials, pixel_size_mm, layer_height_mm, rgb_image,
+                base_thickness_mm, invert_z
+            )
         
         # 2. Generate [Content_Types].xml
         content_types_xml = self._generate_content_types()
@@ -122,7 +131,8 @@ class Exporter:
     def _generate_model_xml_greedy(self, layer_data: np.ndarray, materials: list[dict], 
                                     pixel_size_mm: float, layer_height_mm: float,
                                     rgb_image: np.ndarray = None,
-                                    base_thickness_mm: float = 0.0) -> tuple[str, list[int]]:
+                                    base_thickness_mm: float = 0.0,
+                                    invert_z: bool = False) -> tuple[str, list[int]]:
         """
         Generate 3MF model XML using greedy meshing.
         
@@ -153,10 +163,15 @@ class Exporter:
         object_ids = []
         current_id = 1
         
-        # Generate base layer as separate object (at Z=0, below color layers)
+        # Generate base layer as separate object
+        # If invert_z: Base is at Top (Z = num_layers * h)
+        # Else: Base is at Bottom (Z = 0)
         if base_thickness_mm > 0:
+            base_z_start = (num_layers * layer_height_mm) if invert_z else 0.0
+            
             base_coords, base_faces, base_colors = self._generate_base_layer(
-                H, W, pixel_size_mm, base_thickness_mm, material_colors[0] if materials else (255, 255, 255)
+                H, W, pixel_size_mm, base_thickness_mm, material_colors[0] if materials else (255, 255, 255),
+                start_z=base_z_start
             )
             if len(base_coords) > 0:
                 obj_id = current_id
@@ -228,10 +243,12 @@ class Exporter:
                 xml_parts.append('</object>')
         
         # Create one object per material (color layers sit above base)
+        # All materials participate in color layers for proper color mixing
         for m_idx, mat in enumerate(materials):
             coords, faces, colors = self._generate_greedy_mesh_for_material(
                 layer_data, m_idx, material_colors, pixel_size_mm, layer_height_mm,
-                rgb_image if use_rgb_image else None, base_thickness_mm
+                rgb_image if use_rgb_image else None, base_thickness_mm,
+                invert_z=invert_z
             )
             
             if len(coords) == 0:
@@ -324,16 +341,10 @@ class Exporter:
                                             pixel_size_mm: float, 
                                             layer_height_mm: float,
                                             rgb_image: np.ndarray = None,
-                                            base_thickness_mm: float = 0.0) -> tuple:
+                                            base_thickness_mm: float = 0.0,
+                                            invert_z: bool = False) -> tuple:
         """
         Generate mesh for a material using greedy meshing.
-        
-        For each layer, finds the 2D mask of pixels using this material,
-        applies greedy meshing to merge into rectangles, then creates
-        3D blocks for each merged rectangle.
-        
-        Args:
-            base_thickness_mm: Z offset for color layers (to sit on top of base)
         """
         H, W, num_layers = layer_data.shape
         
@@ -344,10 +355,17 @@ class Exporter:
         
         mat_r, mat_g, mat_b = material_colors[m_idx] if m_idx < len(material_colors) else (255, 255, 255)
         
-        # Z offset for color layers (base layer is at Z=0, color layers above it)
-        # Layer order is flipped: layer 0 (finest detail) is at top, layer N-1 at bottom
-        # This way, viewing from top shows the detailed color layer
-        z_offset = base_thickness_mm
+        # Determine Z offset and direction
+        if invert_z:
+            # Face Down Mode:
+            # - Color layers start at Z=0 (z_offset = 0)
+            # - Layer 0 (Detail) is at Z=0 (No flip)
+            z_offset = 0.0
+        else:
+            # Standard Mode:
+            # - Color layers start above base (z_offset = base_thickness)
+            # - Layer 0 (Detail) is at Top (Flipped)
+            z_offset = base_thickness_mm
         
         for z in range(num_layers):
             # Get 2D mask for this material at this layer
@@ -359,18 +377,27 @@ class Exporter:
             # Apply greedy meshing to get merged rectangles
             rectangles = self._greedy_mesh_2d(mask)
             
-            # Flip layer order: layer 0 is at top, layer (num_layers-1) is at bottom
-            # z_base = base_thickness + (num_layers - 1 - z) * layer_height
-            flipped_z = num_layers - 1 - z
-            z_base = z_offset + flipped_z * layer_height_mm
-            z_top = z_offset + (flipped_z + 1) * layer_height_mm
+            # Calculate Z height for this layer block
+            if invert_z:
+                # Normal order: layer 0 at bottom
+                current_z_idx = z
+            else:
+                # Flipped order: layer 0 at top
+                current_z_idx = num_layers - 1 - z
+            
+            z_base = z_offset + current_z_idx * layer_height_mm
+            z_top = z_offset + (current_z_idx + 1) * layer_height_mm
+
             
             for (rx, ry, rw, rh) in rectangles:
                 # Convert pixel coordinates to mm
-                x_min = rx * pixel_size_mm
-                y_min = ry * pixel_size_mm
-                x_max = (rx + rw) * pixel_size_mm
-                y_max = (ry + rh) * pixel_size_mm
+                # Flip both X and Y to correct image orientation:
+                # - Image Y=0 is at top, 3D Y=0 is at bottom (flip Y)
+                # - Also flip X to correct left-right mirroring
+                x_min = (W - rx - rw) * pixel_size_mm
+                x_max = (W - rx) * pixel_size_mm
+                y_min = (H - ry - rh) * pixel_size_mm
+                y_max = (H - ry) * pixel_size_mm
                 
                 # Determine color - use center pixel of rectangle
                 center_y = ry + rh // 2
@@ -419,29 +446,33 @@ class Exporter:
         return coords, faces, colors
 
     def _generate_base_layer(self, H: int, W: int, pixel_size_mm: float, 
-                             base_thickness_mm: float, base_color: tuple) -> tuple:
+                             base_thickness_mm: float, base_color: tuple,
+                             start_z: float = 0.0) -> tuple:
         """
-        Generate a solid rectangular base layer covering the entire model footprint.
+        Generate a solid rectangular base layer.
         
-        This ensures no floating regions and provides a stable printing foundation.
+        Args:
+            start_z: Starting Z height for the base
         """
         x_max = W * pixel_size_mm
         y_max = H * pixel_size_mm
-        z_top = base_thickness_mm
+        z_bottom = start_z
+        z_top = start_z + base_thickness_mm
         
         r, g, b = base_color
         
         # Single rectangular block covering the entire base
         coords = np.array([
-            [0, 0, 0],
-            [x_max, 0, 0],
-            [x_max, y_max, 0],
-            [0, y_max, 0],
+            [0, 0, z_bottom],
+            [x_max, 0, z_bottom],
+            [x_max, y_max, z_bottom],
+            [0, y_max, z_bottom],
             [0, 0, z_top],
             [x_max, 0, z_top],
             [x_max, y_max, z_top],
             [0, y_max, z_top],
         ], dtype=np.float64)
+
         
         # 6 faces as quads
         faces = np.array([
@@ -511,3 +542,163 @@ class Exporter:
         t_str = np.char.add(t_str, '" />')
         
         return "".join(t_str)
+
+    def _generate_model_xml_per_pixel(self, layer_data: np.ndarray, materials: list[dict], 
+                                       pixel_size_mm: float, layer_height_mm: float,
+                                       rgb_image: np.ndarray = None,
+                                       base_thickness_mm: float = 0.0,
+                                       invert_z: bool = False) -> tuple[str, list[int]]:
+        """
+        Generate 3MF model XML with per-pixel cubes (like LD_ColorLayering).
+        
+        Creates individual cubes for each pixel at each layer, without merging.
+        This produces larger file sizes but may be more compatible with slicers.
+        
+        Returns:
+            Tuple of (model_xml_string, object_ids_list)
+        """
+        H, W, num_layers = layer_data.shape
+        
+        # Build color lookup from materials
+        material_colors = [self._get_material_color(m) for m in materials]
+        num_materials = len(materials)
+        
+        # Prepare per-material vertex/face storage
+        mat_vertices = [[] for _ in range(num_materials)]
+        mat_faces = [[] for _ in range(num_materials)]
+        mat_colors = [[] for _ in range(num_materials)]
+        
+        # Calculate base offset
+        if invert_z:
+            color_layer_z_start = 0.0
+        else:
+            color_layer_z_start = base_thickness_mm
+        
+        # Standard cube definition (unit cube at origin)
+        cube_verts = np.array([
+            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],  # bottom
+            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]   # top
+        ], dtype=float)
+        
+        # Faces as quads (v0, v1, v2, v3)
+        cube_faces = np.array([
+            [0, 1, 2, 3],  # bottom (-Z)
+            [4, 7, 6, 5],  # top (+Z)
+            [0, 4, 5, 1],  # front (-Y)
+            [2, 6, 7, 3],  # back (+Y)
+            [0, 3, 7, 4],  # left (-X)
+            [1, 5, 6, 2]   # right (+X)
+        ])
+        
+        # Iterate through each pixel and layer
+        for y in range(H):
+            for x in range(W):
+                # Pixel position in mm
+                # Flip both X and Y to correct image orientation (matches greedy mesh behavior)
+                px = (W - 1 - x) * pixel_size_mm  # Flip X axis
+                py = (H - 1 - y) * pixel_size_mm  # Flip Y axis
+                
+                for z in range(num_layers):
+                    m_idx = int(layer_data[y, x, z])
+                    if m_idx < 0 or m_idx >= num_materials:
+                        continue
+                    
+                    # Calculate Z position
+                    if invert_z:
+                        pz = (num_layers - 1 - z) * layer_height_mm + color_layer_z_start
+                    else:
+                        pz = z * layer_height_mm + color_layer_z_start
+                    
+                    # Scale and translate cube vertices
+                    scaled_verts = cube_verts.copy()
+                    scaled_verts[:, 0] = scaled_verts[:, 0] * pixel_size_mm + px
+                    scaled_verts[:, 1] = scaled_verts[:, 1] * pixel_size_mm + py
+                    scaled_verts[:, 2] = scaled_verts[:, 2] * layer_height_mm + pz
+                    
+                    # Get vertex offset for this material
+                    v_offset = len(mat_vertices[m_idx])
+                    
+                    # Add vertices
+                    mat_vertices[m_idx].extend(scaled_verts.tolist())
+                    
+                    # Add faces with offset
+                    for face in cube_faces:
+                        mat_faces[m_idx].append([f + v_offset for f in face])
+                    
+                    # Add colors (material color for each vertex)
+                    color = material_colors[m_idx]
+                    for _ in range(8):
+                        mat_colors[m_idx].append(color)
+        
+        # Build XML
+        xml_parts = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<model unit="millimeter">',
+            '<resources>'
+        ]
+        
+        object_ids = []
+        current_id = 1
+        
+        # Generate base layer as separate object
+        if base_thickness_mm > 0:
+            base_z_start = (num_layers * layer_height_mm) if invert_z else 0.0
+            
+            base_coords, base_faces_arr, base_colors_arr = self._generate_base_layer(
+                H, W, pixel_size_mm, base_thickness_mm, material_colors[0] if materials else (255, 255, 255),
+                start_z=base_z_start
+            )
+            if len(base_coords) > 0:
+                obj_id = current_id
+                current_id += 1
+                object_ids.append(obj_id)
+                
+                xml_parts.append(f'<object id="{obj_id}" name="base(白)" type="model">')
+                xml_parts.append('<mesh>')
+                xml_parts.append('<vertices>')
+                xml_parts.append(self._vertices_to_xml(base_coords, base_colors_arr))
+                xml_parts.append('</vertices>')
+                xml_parts.append('<triangles>')
+                xml_parts.append(self._faces_to_xml(base_faces_arr))
+                xml_parts.append('</triangles>')
+                xml_parts.append('</mesh>')
+                xml_parts.append('</object>')
+        
+        # Generate objects for each material
+        for m_idx in range(num_materials):
+            if len(mat_vertices[m_idx]) == 0:
+                continue
+            
+            obj_id = current_id
+            current_id += 1
+            object_ids.append(obj_id)
+            
+            mat_name = materials[m_idx].get('name', f'Material_{m_idx}')
+            
+            xml_parts.append(f'<object id="{obj_id}" name="{mat_name}" type="model">')
+            xml_parts.append('<mesh>')
+            xml_parts.append('<vertices>')
+            
+            # Convert to numpy for efficient processing
+            coords = np.array(mat_vertices[m_idx])
+            colors = np.array(mat_colors[m_idx])
+            faces = np.array(mat_faces[m_idx])
+            
+            xml_parts.append(self._vertices_to_xml(coords, colors))
+            xml_parts.append('</vertices>')
+            xml_parts.append('<triangles>')
+            xml_parts.append(self._faces_to_xml(faces))
+            xml_parts.append('</triangles>')
+            xml_parts.append('</mesh>')
+            xml_parts.append('</object>')
+        
+        # Close resources and build
+        xml_parts.append('</resources>')
+        xml_parts.append('<build>')
+        for oid in object_ids:
+            xml_parts.append(f'<item objectid="{oid}" />')
+        xml_parts.append('</build>')
+        xml_parts.append('</model>')
+        
+        return "".join(xml_parts), object_ids
+

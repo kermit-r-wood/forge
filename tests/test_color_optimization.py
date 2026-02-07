@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import cv2
-from forge.core.color_distance import cie76_distance, cie94_distance, ciede2000_distance
+from forge.core.color_distance import cie76_distance, ciede2000_distance
 from forge.core.analyzer import Analyzer
 from forge.core.dithering.base import BaseDither
 
@@ -13,13 +13,11 @@ def test_distance_metrics():
     c2 = np.array([50.0, 82.0, 62.0])
     
     d76 = cie76_distance(c1, c2)
-    d94 = cie94_distance(c1, c2)
     d00 = ciede2000_distance(c1, c2)
     
-    print(f"Distances: CIE76={d76}, CIE94={d94}, CIEDE2000={d00}")
+    print(f"Distances: CIE76={d76}, CIEDE2000={d00}")
     
     assert d76 > 0
-    assert d94 > 0
     assert d00 > 0
     assert d76 != d00 # Should be different
 

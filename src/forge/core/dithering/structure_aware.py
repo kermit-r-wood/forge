@@ -1,32 +1,16 @@
 """
-结构感知抖动实现 (Numba 加速版)
+结构感知抖动实现 (Numba 加速版) - LAB 色彩空间
 使用边缘检测来自适应调整抖动强度，保留边缘清晰度
 """
 import numpy as np
 from numba import jit
 import cv2
-from .base import BaseDither
+from .base import BaseDither, _find_closest_color_lab, precompute_palette_lab
 
 
 @jit(nopython=True, cache=True)
-def _find_closest_color_fast(pixel_r, pixel_g, pixel_b, palette):
-    """快速查找最近颜色 (Numba JIT)"""
-    best_dist = 1e10
-    best_idx = 0
-    
-    for i in range(len(palette)):
-        pr, pg, pb = palette[i, 0], palette[i, 1], palette[i, 2]
-        dist = (pixel_r - pr)**2 + (pixel_g - pg)**2 + (pixel_b - pb)**2
-        if dist < best_dist:
-            best_dist = dist
-            best_idx = i
-    
-    return best_idx
-
-
-@jit(nopython=True, cache=True)
-def _structure_aware_kernel(float_img, palette, out_img, edge_strength):
-    """结构感知抖动核心算法 (Numba JIT 加速)"""
+def _structure_aware_kernel_lab(float_img, palette_rgb, palette_lab, out_img, edge_strength):
+    """结构感知抖动核心算法 (Numba JIT 加速) - 使用 LAB 色彩匹配"""
     h, w = float_img.shape[:2]
     
     for y in range(h):
@@ -42,11 +26,11 @@ def _structure_aware_kernel(float_img, palette, out_img, edge_strength):
             old_g = float_img[y, x, 1]
             old_b = float_img[y, x, 2]
             
-            best_idx = _find_closest_color_fast(old_r, old_g, old_b, palette)
+            best_idx = _find_closest_color_lab(old_r, old_g, old_b, palette_lab)
             
-            new_r = palette[best_idx, 0]
-            new_g = palette[best_idx, 1]
-            new_b = palette[best_idx, 2]
+            new_r = palette_rgb[best_idx, 0]
+            new_g = palette_rgb[best_idx, 1]
+            new_b = palette_rgb[best_idx, 2]
             
             out_img[y, x, 0] = int(new_r)
             out_img[y, x, 1] = int(new_g)
@@ -93,7 +77,7 @@ def _structure_aware_kernel(float_img, palette, out_img, edge_strength):
 
 class StructureAwareDither(BaseDither):
     """
-    结构感知抖动 (Numba 加速版)
+    结构感知抖动 (Numba 加速版) - LAB 色彩匹配
     使用边缘检测自适应调整误差扩散，保留线条和文字清晰度
     """
     
@@ -135,9 +119,12 @@ class StructureAwareDither(BaseDither):
         out_img = np.zeros((h, w, 3), dtype=np.uint8)
         palette_float = palette.astype(np.float64)
         
+        # 预计算 palette 的 LAB 值
+        palette_lab = precompute_palette_lab(palette_float)
+        
         # 计算边缘强度
         edge_strength = self._compute_edge_strength(image)
         
-        _structure_aware_kernel(float_img, palette_float, out_img, edge_strength)
+        _structure_aware_kernel_lab(float_img, palette_float, palette_lab, out_img, edge_strength)
                         
         return out_img

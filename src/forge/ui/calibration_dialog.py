@@ -8,7 +8,7 @@ from PySide6.QtGui import QImage, QPixmap, QColor
 import numpy as np
 from pathlib import Path
 
-from forge.core.calibration import CalibrationGenerator, CalibrationSolver
+from forge.core.calibration import CalibrationGenerator, CalibrationSolver, OpticsCalibrationSolver
 
 
 class ClickableImageLabel(QLabel):
@@ -318,13 +318,23 @@ class CalibrationDialog(QDialog):
             
         # Run in thread ideally, but for now blocking is okay-ish for prototype (minimizer is fast for 16 points)
         try:
+            # Step 1: Optimize optical model parameters first
+            optics_params = OpticsCalibrationSolver.solve(self.current_materials, obs_list)
+            self.optimized_optics = optics_params
+            
+            # Step 2: Optimize material parameters (with new optics applied)
             optimized = CalibrationSolver.solve(self.current_materials, obs_list)
             self.optimized_materials = optimized
             
             # Show results
-            text = "计算成功! 参数:\n"
+            text = "计算成功!\n\n"
+            text += "光学参数:\n"
+            text += f"  absorption_factor: {optics_params['absorption_factor']:.3f}\n"
+            text += f"  scatter_contribution: {optics_params['scatter_contribution']:.3f}\n"
+            text += f"  scatter_blend: {optics_params['scatter_blend']:.3f}\n\n"
+            text += "材料参数:\n"
             for m in optimized:
-                text += f"{m['name']}: Opacity={m['opacity']:.2f}, Color={m['color']}\n"
+                text += f"  {m['name']}: Opacity={m['opacity']:.2f}, Color={m['color']}\n"
             self.result_label.setText(text)
             self.apply_btn.setEnabled(True)
             

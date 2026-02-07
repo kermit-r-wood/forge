@@ -1,11 +1,11 @@
 """
-Ordered Dithering (Bayer Matrix) 实现
+Ordered Dithering (Bayer Matrix) 实现 - LAB 色彩空间
 使用 Bayer 矩阵实现规则图案抖动，适合像素艺术风格
 计算速度快，无误差扩散
 """
 import numpy as np
 from numba import jit, prange
-from .base import BaseDither
+from .base import BaseDither, _find_closest_color_lab, precompute_palette_lab
 
 # Bayer 矩阵生成函数
 def _generate_bayer_matrix(n: int) -> np.ndarray:
@@ -35,19 +35,19 @@ _BAYER_16 = _generate_bayer_matrix(16) / 256.0
 
 
 @jit(nopython=True, parallel=True, cache=True)
-def _ordered_dither_kernel(
+def _ordered_dither_kernel_lab(
     image: np.ndarray,
     palette_rgb: np.ndarray,
+    palette_lab: np.ndarray,
     threshold_matrix: np.ndarray,
     spread: float,
     out_img: np.ndarray
 ):
     """
-    Ordered Dithering 核心算法 (Numba JIT 加速)
+    Ordered Dithering 核心算法 (Numba JIT 加速) - 使用 LAB 色彩匹配
     """
     h, w, _ = image.shape
     th, tw = threshold_matrix.shape
-    n_colors = len(palette_rgb)
     
     for y in prange(h):
         for x in range(w):
@@ -64,28 +64,17 @@ def _ordered_dither_kernel(
             g = max(0.0, min(255.0, g))
             b = max(0.0, min(255.0, b))
             
-            # 找到最近的调色板颜色
-            best_dist = 1e10
-            best_idx = 0
+            # 使用 LAB 距离找到最近的调色板颜色
+            best_idx = _find_closest_color_lab(r, g, b, palette_lab)
             
-            for i in range(n_colors):
-                pr = palette_rgb[i, 0]
-                pg = palette_rgb[i, 1]
-                pb = palette_rgb[i, 2]
-                dist = (r - pr)**2 + (g - pg)**2 + (b - pb)**2
-                
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = i
-            
-            out_img[y, x, 0] = palette_rgb[best_idx, 0]
-            out_img[y, x, 1] = palette_rgb[best_idx, 1]
-            out_img[y, x, 2] = palette_rgb[best_idx, 2]
+            out_img[y, x, 0] = int(palette_rgb[best_idx, 0])
+            out_img[y, x, 1] = int(palette_rgb[best_idx, 1])
+            out_img[y, x, 2] = int(palette_rgb[best_idx, 2])
 
 
 class OrderedDither(BaseDither):
     """
-    Ordered (Bayer) Dithering
+    Ordered (Bayer) Dithering - LAB 色彩匹配
     产生规则的像素艺术风格图案，计算速度快
     """
     
@@ -120,14 +109,18 @@ class OrderedDither(BaseDither):
         out_img = np.zeros((h, w, 3), dtype=np.uint8)
         
         # 准备数据
-        img_float = image.astype(np.float32)
-        palette_float = palette.astype(np.float32)
+        img_float = image.astype(np.float64)
+        palette_float = palette.astype(np.float64)
+        
+        # 预计算 palette 的 LAB 值
+        palette_lab = precompute_palette_lab(palette_float)
         
         # 调用 Numba 加速的核心算法
-        _ordered_dither_kernel(
+        _ordered_dither_kernel_lab(
             img_float,
             palette_float,
-            self._threshold_matrix,
+            palette_lab,
+            self._threshold_matrix.astype(np.float64),
             self.spread,
             out_img
         )

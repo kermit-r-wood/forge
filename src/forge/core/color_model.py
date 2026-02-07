@@ -9,15 +9,17 @@ from .optics import calculate_transmitted_color
 class ColorModel:
     """颜色模型"""
     
-    def __init__(self, materials: list[dict], layer_height: float = 0.08, total_layers: int = 5):
+    def __init__(self, materials: list[dict], layer_height: float = 0.08, total_layers: int = 5, base_thickness: float = 0.0):
         """
         :param materials: 材料列表
         :param layer_height: 层高 (mm)
         :param total_layers: 总层数 (包括基底层)
+        :param base_thickness: 底座厚度 (mm)
         """
         self.materials = materials
         self.layer_height = layer_height
         self.total_layers = total_layers
+        self.base_thickness = base_thickness
         self.palette = None
         self.combinations = None # 记录每种颜色对应的材料层组合
     
@@ -41,8 +43,9 @@ class ColorModel:
         valid_combinations = []
         
         for combo in all_combinations:
-            # 构建 layers 数据
+            # 构建 layers 数据 (只包含颜色层，不计算底座层的光学影响)
             layers_data = []
+                
             for mat_idx in combo:
                 mat = self.materials[mat_idx]
                 layers_data.append({

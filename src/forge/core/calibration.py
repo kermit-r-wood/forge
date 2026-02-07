@@ -7,7 +7,7 @@ import cv2
 from scipy.optimize import minimize
 from .color_model import ColorModel
 from .exporter import Exporter
-from .optics import calculate_transmitted_color
+from .optics import calculate_transmitted_color, get_optical_params, set_optical_params
 
 class CalibrationGenerator:
     """Generates calibration 3MF and preview images."""
@@ -142,6 +142,9 @@ class CalibrationSolver:
             x0.extend([r, g, b, mat['opacity']])
             
         def loss_function(params):
+            import cv2
+            from .color_distance import ciede2000_distance
+            
             total_error = 0
             
             temp_materials = [current_materials[0].copy()] # copy White
@@ -180,10 +183,24 @@ class CalibrationSolver:
                         
                 simulated_rgb = calculate_transmitted_color(layers_optics)
                 
-                # Error (MSE)
-                sim_norm = simulated_rgb / 255.0
-                meas_norm = np.array(measured_rgb) / 255.0
-                total_error += np.sum((sim_norm - meas_norm) ** 2)
+                # Convert to LAB for CIEDE2000 comparison
+                sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.uint8)
+                meas_rgb_arr = np.array([[measured_rgb]], dtype=np.uint8)
+                
+                sim_lab = cv2.cvtColor(sim_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
+                meas_lab = cv2.cvtColor(meas_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
+                
+                # Use CIEDE2000 perceptual distance
+                delta_e = ciede2000_distance(sim_lab[np.newaxis, :], meas_lab[np.newaxis, :])
+                total_error += float(delta_e[0]) ** 2
+            
+            # L2 regularization to prevent extreme values
+            reg_strength = 0.001
+            for i in range(3):
+                base = i * 4
+                opacity = params[base + 3]
+                # Penalize opacity values far from initial guess
+                total_error += reg_strength * (opacity - x0[base + 3]) ** 2
                 
             return total_error
 
@@ -212,3 +229,136 @@ class CalibrationSolver:
             })
             
         return optimized
+
+
+class OpticsCalibrationSolver:
+    """Solves for optical model parameters (absorption, scatter) using calibration card data."""
+    
+    @staticmethod
+    def solve(materials: list[dict], observations: list[tuple]) -> dict:
+        """
+        Optimize optical model parameters to match observed calibration card colors.
+        
+        Args:
+            materials: List of material definitions [White, C, M, Y]
+            observations: List of (patch_index, (r, g, b)) tuples
+        
+        Returns:
+            dict with optimized optical parameters:
+            {
+                'absorption_factor': float,
+                'scatter_contribution': float, 
+                'scatter_blend': float
+            }
+        """
+        from .color_distance import ciede2000_distance
+        
+        patch_defs = CalibrationGenerator.get_16_color_patches()
+        
+        # Filter valid observations
+        valid_obs = []
+        for p_idx, measured_rgb in observations:
+            if 0 <= p_idx < len(patch_defs):
+                valid_obs.append((patch_defs[p_idx], measured_rgb))
+                
+        if not valid_obs:
+            raise ValueError("No valid observations provided")
+        
+        def hex_to_rgb(hex_str):
+            h = hex_str.lstrip('#')
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+        
+        # Build layer stacks for each observation
+        def build_layers(counts):
+            c, m, y = counts
+            layers_optics = []
+            # Cyan
+            for _ in range(c):
+                layers_optics.append({
+                    'color': materials[1]['color'], 
+                    'opacity': materials[1]['opacity'], 
+                    'thickness': 0.08
+                })
+            # Magenta
+            for _ in range(m):
+                layers_optics.append({
+                    'color': materials[2]['color'], 
+                    'opacity': materials[2]['opacity'], 
+                    'thickness': 0.08
+                })
+            # Yellow
+            for _ in range(y):
+                layers_optics.append({
+                    'color': materials[3]['color'], 
+                    'opacity': materials[3]['opacity'], 
+                    'thickness': 0.08
+                })
+            # Fill with white
+            rem = 5 - (c + m + y)
+            if rem > 0:
+                mat0_color = materials[0]['color']
+                if isinstance(mat0_color, str):
+                    mat0_color = hex_to_rgb(mat0_color)
+                for _ in range(rem):
+                    layers_optics.append({
+                        'color': mat0_color,
+                        'opacity': materials[0]['opacity'],
+                        'thickness': 0.08
+                    })
+            return layers_optics
+        
+        # Initial guess for optical params
+        current_params = get_optical_params()
+        x0 = [
+            current_params['absorption_factor'],
+            current_params['scatter_contribution'],
+            current_params['scatter_blend']
+        ]
+        
+        def loss_function(params):
+            abs_factor, scat_contrib, scat_blend = params
+            
+            # Constrain to valid ranges
+            abs_factor = max(0.01, min(2.0, abs_factor))
+            scat_contrib = max(0.01, min(2.0, scat_contrib))
+            scat_blend = max(0.01, min(1.0, scat_blend))
+            
+            total_error = 0.0
+            
+            for counts, measured_rgb in valid_obs:
+                layers = build_layers(counts)
+                
+                # Simulate color with current optical params
+                simulated_rgb = calculate_transmitted_color(
+                    layers,
+                    absorption_factor=abs_factor,
+                    scatter_contribution=scat_contrib,
+                    scatter_blend=scat_blend
+                )
+                
+                # Convert to LAB for CIEDE2000
+                sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.uint8)
+                meas_rgb_arr = np.array([[measured_rgb]], dtype=np.uint8)
+                
+                sim_lab = cv2.cvtColor(sim_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
+                meas_lab = cv2.cvtColor(meas_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
+                
+                delta_e = ciede2000_distance(sim_lab[np.newaxis, :], meas_lab[np.newaxis, :])
+                total_error += float(delta_e[0]) ** 2
+            
+            return total_error
+        
+        # Optimize
+        bounds = [(0.01, 2.0), (0.01, 2.0), (0.01, 1.0)]
+        result = minimize(loss_function, x0, bounds=bounds, method='L-BFGS-B')
+        
+        optimized_params = {
+            'absorption_factor': float(np.clip(result.x[0], 0.01, 2.0)),
+            'scatter_contribution': float(np.clip(result.x[1], 0.01, 2.0)),
+            'scatter_blend': float(np.clip(result.x[2], 0.01, 1.0))
+        }
+        
+        # Apply the optimized parameters globally
+        set_optical_params(**optimized_params)
+        
+        return optimized_params

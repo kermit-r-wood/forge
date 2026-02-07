@@ -96,7 +96,8 @@ class Analyzer:
         
     def process(self, settings: dict, materials: list[dict], 
                 width_mm: float = 100, pixel_size_mm: float = 0.4,
-                layer_height_mm: float = 0.08, layers: int = 5):
+                layer_height_mm: float = 0.08, layers: int = 5,
+                base_thickness_mm: float = 0.0):
         """执行处理流程"""
         if self.image is None:
             return
@@ -112,7 +113,7 @@ class Analyzer:
         current_img = img_resized
         
         # 2. 生成目标调色板 (Virtual Palette based on Materials)
-        color_model = ColorModel(materials, layer_height=layer_height_mm, total_layers=layers)
+        color_model = ColorModel(materials, layer_height=layer_height_mm, total_layers=layers, base_thickness=base_thickness_mm)
         palette, combinations = color_model.generate_palette()
         self.palette = palette
         self.combinations = combinations
@@ -150,35 +151,38 @@ class Analyzer:
             dither_algo = self.dithers.get(dither_idx)
             
             if dither_algo:
-                # 使用 Dither 算法得到视觉图像
-                processed_rgb = dither_algo.apply(current_img, palette)
-                self.processed = processed_rgb
+                # 使用 Dither 算法得到抖动图像
+                dithered_rgb = dither_algo.apply(current_img, palette)
                 
                 # 生成 Index Map (用于 3MF 生成)
-                if distance_metric == 'cie76':
-                    indices = self._match_colors_lab(processed_rgb, palette, target_h, target_w)
-                else:
-                    indices = self._match_colors_advanced(processed_rgb, palette, target_h, target_w, distance_metric)
-                self.indices = indices
+                # 使用 CIE76 (LAB 欧几里得距离) 匹配
+                indices = self._match_colors_lab(dithered_rgb, palette, target_h, target_w)
+                
+                # Post-process: Clean up indices to avoid printer issues
+                self.indices = self._clean_indices(indices, 
+                                                 min_area=settings.get('min_area', 4),
+                                                 kernel_size=settings.get('kernel_size', 1))
+                
+                # 预览使用 palette 颜色（材料组合颜色），而非抖动 RGB
+                # 这确保预览与实际打印效果一致
+                self.processed = self.palette[self.indices]
                 
             else:
                 # 无抖动，直接匹配
-                if distance_metric == 'cie76':
-                    indices = self._match_colors_lab(current_img, palette, target_h, target_w)
-                else:
-                    indices = self._match_colors_advanced(current_img, palette, target_h, target_w, distance_metric)
+                indices = self._match_colors_lab(current_img, palette, target_h, target_w)
+
                     
-                self.indices = indices
-                
                 # Post-process: Clean up indices to avoid slicer warnings
                 # (Removing single pixels and thin lines)
-                self.indices = self._clean_indices(self.indices)
+                self.indices = self._clean_indices(indices,
+                                                 min_area=settings.get('min_area', 4),
+                                                 kernel_size=settings.get('kernel_size', 1))
                 self.processed = self.palette[self.indices]
         
         # Apply greedy mesh preview to match the exported 3MF
         self.apply_greedy_mesh_preview()
 
-    def _clean_indices(self, indices: np.ndarray) -> np.ndarray:
+    def _clean_indices(self, indices: np.ndarray, min_area: int = 0, kernel_size: int = 1) -> np.ndarray:
         """
         Clean up indices map to remove noise and thin lines suitable for 3D printing.
         Optimized to prevent printer head clogging from small parts.
@@ -188,11 +192,13 @@ class Analyzer:
             
         h, w = indices.shape
         
-        # Parameters - increased for 3D printing optimization
-        MIN_AREA = 100     # Filter out regions smaller than this - increased from 25
-        KERNEL_SIZE = 3    # Kernel for opening
+        # Parameters - Adjusted to preserve dithering details while removing noise
+        # Dithering produces small 1-2 pixel dots which are essential for the visual effect.
+        # Too aggressive filtering destroys the image content.
+        MIN_AREA = min_area
+        KERNEL_SIZE = kernel_size
         kernel = np.ones((KERNEL_SIZE, KERNEL_SIZE), np.uint8)
-        kernel_close = np.ones((5, 5), np.uint8)  # Larger kernel for closing
+        kernel_close = np.ones((3, 3), np.uint8)  # Smaller closing kernel
         
         # Determine Background Index
         counts = np.bincount(indices.flatten())
@@ -209,7 +215,10 @@ class Analyzer:
             
             # A. Morphological Opening
             # Removes thin connections and small noise
-            mask_opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            if KERNEL_SIZE > 1:
+                mask_opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            else:
+                mask_opened = mask
             
             # B. Morphological Closing
             # Fills small holes and connects nearby regions to reduce fragmentation
@@ -233,8 +242,8 @@ class Analyzer:
         return result_indices
 
     def _match_colors_lab(self, image: np.ndarray, palette: np.ndarray, h: int, w: int) -> np.ndarray:
-        """使用 LAB 色彩空间进行颜色匹配"""
-        from scipy.spatial import KDTree
+        """使用 CIEDE2000 色彩距离进行颜色匹配"""
+        from .color_distance import ciede2000_distance
         
         # 将 palette 转换为 LAB
         palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
@@ -242,93 +251,32 @@ class Analyzer:
         
         # 将图像转换为 LAB
         image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
-        
-        # 在 LAB 空间构建 KDTree
-        tree = KDTree(palette_lab)
-        
-        # 匹配
         flat_lab = image_lab.reshape(-1, 3)
-        _, indices = tree.query(flat_lab)
+        
+        # 使用 CIEDE2000 距离匹配
+        # 对每个像素计算与所有 palette 颜色的距离，选择最近的
+        n_pixels = flat_lab.shape[0]
+        n_palette = palette_lab.shape[0]
+        
+        # 分批处理以避免内存问题
+        batch_size = 10000
+        indices = np.zeros(n_pixels, dtype=np.int32)
+        
+        for start in range(0, n_pixels, batch_size):
+            end = min(start + batch_size, n_pixels)
+            batch = flat_lab[start:end]
+            
+            # 计算此批次与所有 palette 颜色的距离
+            # batch: (B, 3), palette_lab: (P, 3) -> distances: (B, P)
+            distances = np.zeros((end - start, n_palette), dtype=np.float32)
+            for i, pixel_lab in enumerate(batch):
+                pixel_expanded = np.tile(pixel_lab, (n_palette, 1))
+                distances[i] = ciede2000_distance(pixel_expanded, palette_lab)
+            
+            indices[start:end] = np.argmin(distances, axis=1)
         
         return indices.reshape(h, w)
 
-    def _match_colors_advanced(self, image: np.ndarray, palette: np.ndarray, h: int, w: int, metric: str) -> np.ndarray:
-        """
-        使用高级颜色距离算法进行匹配 (Vectorized Hybrid Approach)
-        1. 使用 KDTree 找到 K 个最近邻 (Euclidean LAB)
-        2. 对 K 个候选者计算复杂距离 (CIEDE2000/CIE94)
-        3. 选择最佳匹配
-        """
-        from scipy.spatial import KDTree
-        from .color_distance import ciede2000_distance
-        
-        # 准备数据
-        palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
-        palette_lab = cv2.cvtColor(palette_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
-        
-        image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
-        flat_lab = image_lab.reshape(-1, 3)
-        
-        # [Optimization] 强制白色保护
-        # 如果亮度 L > 98 (约250/255)，直接映射到最白的颜色
-        # 找到 Palette 中最白的颜色索引 (最大 L)
-        palette_L = palette_lab[:, 0]
-        white_idx = np.argmax(palette_L)
-        
-        # 标记高亮像素
-        L_channel = flat_lab[:, 0]
-        # Calculate Chroma (Saturation) to avoid whitening colorful highlights (like cream)
-        a_channel = flat_lab[:, 1]
-        b_channel = flat_lab[:, 2]
-        C_channel = np.sqrt(a_channel**2 + b_channel**2)
-        
-        # Condition: High Brightness AND Low Saturation
-        # L > 230 (approx 90%)
-        # C < 6 (very low saturation, almost neutral)
-        high_key_mask = (L_channel > 230.0) & (C_channel < 6.0)
-        
-        is_high_key = high_key_mask
-        
-        # 1. 粗略筛选 (KDTree)
-        k = 10 # 候选数量
-        tree = KDTree(palette_lab)
-        _, candidates_indices = tree.query(flat_lab, k=min(k, len(palette_lab))) # (N_pixels, K)
-        
-        # 2. 精确计算
-        # 收集候选颜色的 LAB 值
-        candidates_lab = palette_lab[candidates_indices] # (N, K, 3)
-        
-        # Flatten for vectorized distance function
-        N = flat_lab.shape[0]
-        K = candidates_indices.shape[1]
-        
-        p_flat = np.repeat(flat_lab, K, axis=0) # (N*K, 3)
-        c_flat = candidates_lab.reshape(-1, 3)  # (N*K, 3)
-        
-        if metric == 'ciede2000':
-            # Use kL=2.0 to be more tolerant of Lightness differences
-            # This prioritizes Hue/Chroma matching, helping avoid "red/dark" artifacts
-            # when the target is a light cream color that matches "White+Yellow" in Hue
-            # but is slightly darker than the physical filament combination.
-            dists_flat = ciede2000_distance(p_flat, c_flat, kL=2.0)
-        else:
-            diff = p_flat - c_flat
-            dists_flat = np.sum(diff**2, axis=1)
-        
-        # Reshape back to (N, K)
-        dists = dists_flat.reshape(N, K)
-        
-        # 3. 选择最佳
-        best_candidate_idx = np.argmin(dists, axis=1) # (N,) 0 to K-1
-        
-        # Map back to global palette index
-        row_indices = np.arange(N)
-        final_indices = candidates_indices[row_indices, best_candidate_idx]
-        
-        # 应用强制白色
-        final_indices[is_high_key] = white_idx
-        
-        return final_indices.reshape(h, w)
 
     def get_layer_data(self) -> np.ndarray:
         """

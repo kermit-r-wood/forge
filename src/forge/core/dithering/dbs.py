@@ -1,28 +1,12 @@
 """
-Direct Binary Search (DBS) 抖动实现 (Numba 部分加速)
+Direct Binary Search (DBS) 抖动实现 (Numba 部分加速) - LAB 色彩空间
 迭代优化算法，质量最高但速度较慢
 用于 "超高画质" 模式
 """
 import numpy as np
 from numba import jit
 import cv2
-from .base import BaseDither
-
-
-@jit(nopython=True, cache=True)
-def _find_closest_color_idx(pixel_r, pixel_g, pixel_b, palette):
-    """快速查找最近颜色索引 (Numba JIT)"""
-    best_dist = 1e10
-    best_idx = 0
-    
-    for i in range(len(palette)):
-        pr, pg, pb = palette[i, 0], palette[i, 1], palette[i, 2]
-        dist = (pixel_r - pr)**2 + (pixel_g - pg)**2 + (pixel_b - pb)**2
-        if dist < best_dist:
-            best_dist = dist
-            best_idx = i
-    
-    return best_idx
+from .base import BaseDither, _find_closest_color_lab, precompute_palette_lab
 
 
 @jit(nopython=True, cache=True)
@@ -50,8 +34,8 @@ def _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w):
 
 
 @jit(nopython=True, cache=True)
-def _initialize_output(target_img, palette, out_img, indices):
-    """初始化输出图像"""
+def _initialize_output_lab(target_img, palette_rgb, palette_lab, out_img, indices):
+    """初始化输出图像 - 使用 LAB 色彩匹配"""
     h, w = target_img.shape[:2]
     
     for y in range(h):
@@ -60,15 +44,15 @@ def _initialize_output(target_img, palette, out_img, indices):
             g = target_img[y, x, 1]
             b = target_img[y, x, 2]
             
-            idx = _find_closest_color_idx(r, g, b, palette)
+            idx = _find_closest_color_lab(r, g, b, palette_lab)
             indices[y, x] = idx
-            out_img[y, x, 0] = palette[idx, 0]
-            out_img[y, x, 1] = palette[idx, 1]
-            out_img[y, x, 2] = palette[idx, 2]
+            out_img[y, x, 0] = int(palette_rgb[idx, 0])
+            out_img[y, x, 1] = int(palette_rgb[idx, 1])
+            out_img[y, x, 2] = int(palette_rgb[idx, 2])
 
 
 @jit(nopython=True, cache=True)
-def _try_swap(out_img, target_img, indices, palette, filter_kernel, y, x, h, w, n_colors):
+def _try_swap(out_img, target_img, indices, palette_rgb, filter_kernel, y, x, h, w, n_colors):
     """尝试交换当前像素的颜色，如果能降低误差则接受"""
     current_idx = indices[y, x]
     current_error = _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w)
@@ -86,9 +70,9 @@ def _try_swap(out_img, target_img, indices, palette, filter_kernel, y, x, h, w, 
         old_g = out_img[y, x, 1]
         old_b = out_img[y, x, 2]
         
-        out_img[y, x, 0] = palette[new_idx, 0]
-        out_img[y, x, 1] = palette[new_idx, 1]
-        out_img[y, x, 2] = palette[new_idx, 2]
+        out_img[y, x, 0] = int(palette_rgb[new_idx, 0])
+        out_img[y, x, 1] = int(palette_rgb[new_idx, 1])
+        out_img[y, x, 2] = int(palette_rgb[new_idx, 2])
         
         new_error = _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w)
         
@@ -104,22 +88,22 @@ def _try_swap(out_img, target_img, indices, palette, filter_kernel, y, x, h, w, 
     # 如果找到更好的，应用它
     if best_idx != current_idx:
         indices[y, x] = best_idx
-        out_img[y, x, 0] = palette[best_idx, 0]
-        out_img[y, x, 1] = palette[best_idx, 1]
-        out_img[y, x, 2] = palette[best_idx, 2]
+        out_img[y, x, 0] = int(palette_rgb[best_idx, 0])
+        out_img[y, x, 1] = int(palette_rgb[best_idx, 1])
+        out_img[y, x, 2] = int(palette_rgb[best_idx, 2])
         return True
         
     return False
 
 
 @jit(nopython=True, cache=True)
-def _dbs_iteration(out_img, target_img, indices, palette, filter_kernel, h, w, n_colors):
+def _dbs_iteration(out_img, target_img, indices, palette_rgb, filter_kernel, h, w, n_colors):
     """执行一轮 DBS 迭代"""
     changes = 0
     
     for y in range(h):
         for x in range(w):
-            if _try_swap(out_img, target_img, indices, palette, filter_kernel, y, x, h, w, n_colors):
+            if _try_swap(out_img, target_img, indices, palette_rgb, filter_kernel, y, x, h, w, n_colors):
                 changes += 1
                 
     return changes
@@ -127,7 +111,7 @@ def _dbs_iteration(out_img, target_img, indices, palette, filter_kernel, h, w, n
 
 class DBSDither(BaseDither):
     """
-    Direct Binary Search (DBS) 抖动
+    Direct Binary Search (DBS) 抖动 - LAB 色彩匹配
     迭代优化算法，提供最高质量但速度较慢
     适用于追求极致画质的场景
     """
@@ -161,21 +145,24 @@ class DBSDither(BaseDither):
         target_img = image.astype(np.float64)
         out_img = np.zeros((h, w, 3), dtype=np.uint8)
         indices = np.zeros((h, w), dtype=np.int32)
-        palette_uint8 = palette.astype(np.uint8)
+        palette_float = palette.astype(np.float64)
         n_colors = len(palette)
+        
+        # 预计算 palette 的 LAB 值
+        palette_lab = precompute_palette_lab(palette_float)
         
         # 创建 HVS 滤波器
         if self._filter_kernel is None:
             self._filter_kernel = self._create_hvs_filter(5)
         filter_kernel = self._filter_kernel
         
-        # 初始化 (最近邻)
-        _initialize_output(target_img, palette_uint8, out_img, indices)
+        # 初始化 (使用 LAB 最近邻)
+        _initialize_output_lab(target_img, palette_float, palette_lab, out_img, indices)
         
         # 迭代优化
         for iteration in range(self.max_iterations):
             changes = _dbs_iteration(
-                out_img, target_img, indices, palette_uint8, 
+                out_img, target_img, indices, palette_float, 
                 filter_kernel, h, w, n_colors
             )
             

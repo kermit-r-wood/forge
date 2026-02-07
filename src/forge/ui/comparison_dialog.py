@@ -205,11 +205,12 @@ class ComparisonWorker(QThread):
     finished_all = Signal()
     error = Signal(str)
     
-    def __init__(self, image, materials, width_mm, combinations, skip_labels=None):
+    def __init__(self, image, materials, width_mm, combinations, base_thickness_mm=0.0, skip_labels=None):
         super().__init__()
         self.image = image.copy()
         self.materials = materials
         self.width_mm = width_mm
+        self.base_thickness_mm = base_thickness_mm
         self.combinations = combinations
         self.skip_labels = skip_labels or set()
         self._mutex = QMutex()
@@ -271,7 +272,7 @@ class ComparisonWorker(QThread):
             from forge.core.analyzer import Analyzer
             analyzer = Analyzer()
             analyzer.image = self.image.copy()
-            analyzer.process(settings, self.materials, width_mm=self.width_mm)
+            analyzer.process(settings, self.materials, width_mm=self.width_mm, base_thickness_mm=self.base_thickness_mm)
             if analyzer.processed is None:
                 raise ValueError("Analyzer returned None result")
             return analyzer.processed
@@ -293,27 +294,27 @@ class ComparisonDialog(QDialog):
     
     COMBINATIONS = [
         # === 量化算法对比 (固定: 无预处理 + Hilbert抖动) ===
-        {"preprocess": 2, "quantize": 0, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:KMeans | D:Hilbert"},
-        {"preprocess": 2, "quantize": 1, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:中值 | D:Hilbert"},
-        {"preprocess": 2, "quantize": 2, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:八叉树 | D:Hilbert"},
-        {"preprocess": 2, "quantize": 3, "dither": 7, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Hilbert"},
+        {"preprocess": 2, "quantize": 0, "dither": 7, "vectorize": 0, "label": "Q:KMeans | D:Hilbert"},
+        {"preprocess": 2, "quantize": 1, "dither": 7, "vectorize": 0, "label": "Q:中值 | D:Hilbert"},
+        {"preprocess": 2, "quantize": 2, "dither": 7, "vectorize": 0, "label": "Q:八叉树 | D:Hilbert"},
+        {"preprocess": 2, "quantize": 3, "dither": 7, "vectorize": 0, "label": "Q:无 | D:Hilbert"},
         
         # === 抖动算法对比 (固定: 无预处理 + 无量化) ===
-        {"preprocess": 2, "quantize": 3, "dither": 0, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:FS"},
-        {"preprocess": 2, "quantize": 3, "dither": 1, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Atkinson"},
-        {"preprocess": 2, "quantize": 3, "dither": 2, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Sierra"},
-        {"preprocess": 2, "quantize": 3, "dither": 3, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:无"},
-        {"preprocess": 2, "quantize": 3, "dither": 4, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:BlueNoise"},
-        {"preprocess": 2, "quantize": 3, "dither": 5, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:Bayer"},
-        {"preprocess": 2, "quantize": 3, "dither": 6, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:蛇形FS"},
+        {"preprocess": 2, "quantize": 3, "dither": 0, "vectorize": 0, "label": "Q:无 | D:FS"},
+        {"preprocess": 2, "quantize": 3, "dither": 1, "vectorize": 0, "label": "Q:无 | D:Atkinson"},
+        {"preprocess": 2, "quantize": 3, "dither": 2, "vectorize": 0, "label": "Q:无 | D:Sierra"},
+        {"preprocess": 2, "quantize": 3, "dither": 3, "vectorize": 0, "label": "Q:无 | D:无"},
+        {"preprocess": 2, "quantize": 3, "dither": 4, "vectorize": 0, "label": "Q:无 | D:BlueNoise"},
+        {"preprocess": 2, "quantize": 3, "dither": 5, "vectorize": 0, "label": "Q:无 | D:Bayer"},
+        {"preprocess": 2, "quantize": 3, "dither": 6, "vectorize": 0, "label": "Q:无 | D:蛇形FS"},
         # Hilbert 已在量化组中作为基准展示，此处移除以去重
-        {"preprocess": 2, "quantize": 3, "dither": 8, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:结构感知"},
-        {"preprocess": 2, "quantize": 3, "dither": 9, "vectorize": 0, "distance_metric": "ciede2000", "label": "Q:无 | D:DBS"},
+        {"preprocess": 2, "quantize": 3, "dither": 8, "vectorize": 0, "label": "Q:无 | D:结构感知"},
+        {"preprocess": 2, "quantize": 3, "dither": 9, "vectorize": 0, "label": "Q:无 | D:DBS"},
     ]
     
     selection_made = Signal(dict)
     
-    def __init__(self, image: np.ndarray, materials: list, width_mm: float, parent=None):
+    def __init__(self, image: np.ndarray, materials: list, width_mm: float, base_thickness_mm: float = 0.0, base_settings: dict = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("算法效果对比 (双击放大)")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
@@ -323,13 +324,27 @@ class ComparisonDialog(QDialog):
         self.image = image
         self.materials = materials
         self.width_mm = width_mm
+        self.base_thickness_mm = base_thickness_mm
         self.selected_settings = None
         self.thumbnails = {}
         self.worker = None
         self._image_hash = _get_image_hash(image)
         
+        # Merge base_settings (min_area, kernel_size) into combinations
+        self.combinations = []
+        base = base_settings or {}
+        min_area = base.get('min_area', 0) # Defaults to 0 if not provided
+        kernel_size = base.get('kernel_size', 1)
+        
+        for combo in self.COMBINATIONS:
+            c = combo.copy()
+            c['min_area'] = min_area
+            c['kernel_size'] = kernel_size
+            self.combinations.append(c)
+        
         self._setup_ui()
         self._load_cached_or_process()
+
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -341,7 +356,7 @@ class ComparisonDialog(QDialog):
         self.info_label = info
         
         self.progress_bar = QProgressBar()
-        self.progress_bar.setMaximum(len(self.COMBINATIONS))
+        self.progress_bar.setMaximum(len(self.combinations))
         layout.addWidget(self.progress_bar)
         
         scroll = QScrollArea()
@@ -353,7 +368,7 @@ class ComparisonDialog(QDialog):
         self.grid_layout.setSpacing(10)
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
         
-        for i, combo in enumerate(self.COMBINATIONS):
+        for i, combo in enumerate(self.combinations):
             try:
                 row, col = i // 3, i % 3
                 thumbnail = PreviewThumbnail(combo, combo["label"])
@@ -432,7 +447,7 @@ class ComparisonDialog(QDialog):
                 cached_labels.add(label)
         
         # 计算需要处理的组合
-        all_labels = {c["label"] for c in self.COMBINATIONS}
+        all_labels = {c["label"] for c in self.combinations}
         to_process = all_labels - cached_labels
         
         if not to_process:
@@ -446,7 +461,8 @@ class ComparisonDialog(QDialog):
             self.image,
             self.materials,
             self.width_mm,
-            self.COMBINATIONS,
+            self.combinations,
+            base_thickness_mm=self.base_thickness_mm,
             skip_labels=cached_labels
         )
         self.worker.progress.connect(self._on_progress)

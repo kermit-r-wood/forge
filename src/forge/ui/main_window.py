@@ -174,20 +174,36 @@ class AlgorithmPanel(QGroupBox):
         dither_layout.addWidget(self.dither_combo)
         layout.addWidget(dither_group)
         
-        # 距离度量
-        metric_group = QGroupBox("4. 颜色匹配度量")
-        metric_layout = QVBoxLayout(metric_group)
-        self.metric_combo = SafeComboBox()
-        # Item data: (label, internal_value)
-        self.metric_map = [
-            ("CIEDE2000", "ciede2000")
-        ]
-        for label, _ in self.metric_map:
-            self.metric_combo.addItem(label)
-        # 默认选 CIEDE2000
-        self.metric_combo.setCurrentIndex(0) 
-        metric_layout.addWidget(self.metric_combo)
-        layout.addWidget(metric_group)
+        # 细节优化 (Post-Process)
+        opt_group = QGroupBox("4. 细节优化")
+        opt_layout = QVBoxLayout(opt_group)
+        
+        # 杂点过滤 (Min Area)
+        area_layout = QHBoxLayout()
+        area_layout.addWidget(QLabel("杂点过滤:"))
+        self.area_spin = SafeDoubleSpinBox() # Using DoubleSpinBox for consistency, but will store int
+        self.area_spin.setDecimals(0)
+        self.area_spin.setRange(0, 200)
+        self.area_spin.setValue(0)
+        self.area_spin.setToolTip("过滤掉小于此像素数的孤立区域。\n对于抖动模式建议设为 0-5 以保留细节。\n对于色块模式建议设为 20+ 以减少打印碎片。")
+        area_layout.addWidget(self.area_spin)
+        area_layout.addWidget(QLabel("px"))
+        opt_layout.addLayout(area_layout)
+        
+        # 平滑力度 (Kernel Size)
+        smooth_layout = QHBoxLayout()
+        smooth_layout.addWidget(QLabel("平滑力度:"))
+        self.smooth_spin = SafeDoubleSpinBox()
+        self.smooth_spin.setDecimals(0)
+        self.smooth_spin.setRange(1, 5)
+        self.smooth_spin.setValue(1)
+        self.smooth_spin.setSingleStep(2) # 1, 3, 5
+        self.smooth_spin.setToolTip("形态学开运算核大小 (奇数)。\n1: 关闭 (保留所有细节)\n3: 轻微平滑\n5: 强力平滑")
+        smooth_layout.addWidget(self.smooth_spin)
+        opt_layout.addLayout(smooth_layout)
+        
+        layout.addWidget(opt_group)
+
         
         # 矢量化模式
         vectorize_group = QGroupBox("5. 矢量化模式")
@@ -209,15 +225,13 @@ class AlgorithmPanel(QGroupBox):
     
     def get_settings(self) -> dict:
         """获取当前算法设置"""
-        metric_idx = self.metric_combo.currentIndex()
-        metric_val = self.metric_map[metric_idx][1] if 0 <= metric_idx < len(self.metric_map) else "ciede2000"
-        
         return {
             "preprocess": self.preprocess_combo.currentIndex(),
             "quantize": self.quantize_combo.currentIndex(),
             "dither": self.dither_combo.currentIndex(),
-            "distance_metric": metric_val,
-            "vectorize": self.vectorize_combo.currentIndex()
+            "vectorize": self.vectorize_combo.currentIndex(),
+            "min_area": int(self.area_spin.value()),
+            "kernel_size": int(self.smooth_spin.value())
         }
 
 
@@ -359,23 +373,35 @@ class OutputPanel(QGroupBox):
         size_layout.addWidget(self.size_spin)
         layout.addLayout(size_layout)
         
-        # 层高
+        # 像素大小 (同步 LD_ColorLayering 默认 0.6mm)
+        pixel_layout = QHBoxLayout()
+        pixel_layout.addWidget(QLabel("像素大小 (mm):"))
+        self.pixel_spin = SafeDoubleSpinBox()
+        self.pixel_spin.setRange(0.2, 1.0)
+        self.pixel_spin.setValue(0.6)  # LD_ColorLayering 默认值
+        self.pixel_spin.setSingleStep(0.1)
+        self.pixel_spin.setToolTip("每个像素对应的立方体边长。\nLD_ColorLayering 使用 0.6mm。")
+        pixel_layout.addWidget(self.pixel_spin)
+        layout.addLayout(pixel_layout)
+        
+        # 层高 (同步 LD_ColorLayering 默认 0.1mm)
         layer_layout = QHBoxLayout()
         layer_layout.addWidget(QLabel("层高 (mm):"))
         self.layer_spin = SafeDoubleSpinBox()
         self.layer_spin.setRange(0.04, 0.2)
-        self.layer_spin.setValue(0.1)
+        self.layer_spin.setValue(0.1)  # LD_ColorLayering 默认值
         self.layer_spin.setSingleStep(0.02)
         layer_layout.addWidget(self.layer_spin)
         layout.addLayout(layer_layout)
         
-        # 总层数
+        # 总层数 (同步 LD_ColorLayering 默认 3 层)
         layers_layout = QHBoxLayout()
         layers_layout.addWidget(QLabel("颜色层数:"))
         self.layers_spin = SafeDoubleSpinBox()
         self.layers_spin.setDecimals(0)
         self.layers_spin.setRange(3, 8)
-        self.layers_spin.setValue(5)
+        self.layers_spin.setValue(3)  # LD_ColorLayering 默认值
+        self.layers_spin.setToolTip("颜色层数。LD_ColorLayering 使用 3 层。")
         layers_layout.addWidget(self.layers_spin)
         layout.addLayout(layers_layout)
         
@@ -390,14 +416,27 @@ class OutputPanel(QGroupBox):
         base_layout.addWidget(self.base_spin)
         layout.addLayout(base_layout)
         
+        # 贪婪网格合并开关
+        self.greedy_mesh_checkbox = QCheckBox("贪婪网格合并 (优化网格)")
+        self.greedy_mesh_checkbox.setChecked(False)
+        self.greedy_mesh_checkbox.setToolTip(
+            "启用后将相邻相同材料像素合并为更大的矩形块。\n"
+            "可减少网格复杂度，但可能影响打印效果。\n"
+            "如果打印出现问题，请尝试关闭此选项。"
+        )
+        layout.addWidget(self.greedy_mesh_checkbox)
+        
         layout.addStretch()
         
     def get_settings(self) -> dict:
         return {
             "width_mm": self.size_spin.value(),
+            "pixel_size_mm": self.pixel_spin.value(),
             "layer_height_mm": self.layer_spin.value(),
             "layers": int(self.layers_spin.value()),
-            "base_thickness_mm": self.base_spin.value()
+            "base_thickness_mm": self.base_spin.value(),
+            "invert_z": True, # Default to Face Down
+            "greedy_mesh": self.greedy_mesh_checkbox.isChecked()
         }
 
 
@@ -419,8 +458,10 @@ class ProcessingThread(QThread):
                 self.settings, 
                 self.materials,
                 width_mm=self.output_settings['width_mm'],
+                pixel_size_mm=self.output_settings['pixel_size_mm'],
                 layer_height_mm=self.output_settings['layer_height_mm'],
-                layers=self.output_settings['layers']
+                layers=self.output_settings['layers'],
+                base_thickness_mm=self.output_settings.get('base_thickness_mm', 0.0)
             )
             self.finished_signal.emit(self.analyzer.processed)
         except Exception as e:
@@ -455,10 +496,12 @@ class ExportThread(QThread):
                 self.file_path,
                 layer_data,
                 self.materials,
-                pixel_size_mm=0.4, # 假设喷嘴宽度
+                pixel_size_mm=self.output_settings.get('pixel_size_mm', 0.6),
                 layer_height_mm=self.output_settings['layer_height_mm'],
                 rgb_image=rgb_image,
-                base_thickness_mm=self.output_settings.get('base_thickness_mm', 0.0)
+                base_thickness_mm=self.output_settings.get('base_thickness_mm', 0.0),
+                invert_z=self.output_settings.get('invert_z', False),
+                greedy_mesh=self.output_settings.get('greedy_mesh', True)
             )
             self.finished_signal.emit()
         except Exception as e:
@@ -750,12 +793,15 @@ class MainWindow(QMainWindow):
         
         materials = self.material_panel.get_materials()
         output_settings = self.output_panel.get_settings()
+        algo_settings = self.algorithm_panel.get_settings()
         
         dialog = ComparisonDialog(
             self.analyzer.image,
             materials,
             output_settings['width_mm'],
-            self
+            base_thickness_mm=output_settings.get('base_thickness_mm', 0.0),
+            base_settings=algo_settings,
+            parent=self
         )
         dialog.selection_made.connect(self._on_comparison_selected)
         dialog.exec()
@@ -770,15 +816,12 @@ class MainWindow(QMainWindow):
         # 更新矢量化模式
         self.algorithm_panel.vectorize_combo.setCurrentIndex(settings.get('vectorize', 0))
         
-        # 更新距离度量
-        metric_val = settings.get('distance_metric', 'ciede2000')
-        # 查找对应索引
-        index = 0
-        for i, (_, val) in enumerate(self.algorithm_panel.metric_map):
-            if val == metric_val:
-                index = i
-                break
-        self.algorithm_panel.metric_combo.setCurrentIndex(index)
+        # 更新细节优化参数
+        if 'min_area' in settings:
+            self.algorithm_panel.area_spin.setValue(settings['min_area'])
+        if 'kernel_size' in settings:
+            self.algorithm_panel.smooth_spin.setValue(settings['kernel_size'])
+
         
         # 自动执行处理
         self._process_image()
