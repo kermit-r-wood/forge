@@ -4,7 +4,7 @@
 """
 import numpy as np
 import itertools
-from .optics import calculate_transmitted_color
+from .optics import calculate_reflected_color
 
 class ColorModel:
     """颜色模型"""
@@ -55,8 +55,8 @@ class ColorModel:
                 })
             
             # 计算最终颜色
-            # 假设有一个强白光背光
-            color = calculate_transmitted_color(layers_data, light_source=(255, 255, 255))
+            # 使用反射光模式（实心多色打印在正常光照下观看）
+            color = calculate_reflected_color(layers_data, light_source=(255, 255, 255))
             palette.append(color)
             valid_combinations.append(combo)
             

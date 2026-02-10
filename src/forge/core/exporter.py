@@ -15,7 +15,7 @@ class Exporter:
         pass
         
     def export(self, file_path: str, layer_data: np.ndarray, materials: list[dict], 
-               pixel_size_mm: float = 0.4, layer_height_mm: float = 0.08,
+               pixel_size_mm: float = 0.6, layer_height_mm: float = 0.08,
                rgb_image: np.ndarray = None, base_thickness_mm: float = 0.0,
                invert_z: bool = False, greedy_mesh: bool = True):
         """

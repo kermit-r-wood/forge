@@ -125,6 +125,92 @@ def calculate_transmitted_color(
     return np.clip(current_light * 255, 0, 255).astype(np.uint8)
 
 
+def calculate_reflected_color(
+    layers: list[dict], 
+    light_source: tuple = (255, 255, 255),
+    background: tuple = (255, 255, 255),
+    absorption_factor: float = None,
+    scatter_contribution: float = None
+) -> np.ndarray:
+    """
+    Calculate the color seen when light reflects off stacked material layers.
+    
+    In reflected light mode (solid background viewing):
+    - Light enters from the front (viewer side)
+    - Passes through material layers, being absorbed
+    - Reflects off the background (bottom layer / base)
+    - Passes through layers again on the way back
+    - Double-pass absorption results in more saturated colors
+    
+    :param layers: Material layers list (top to bottom, viewer to base)
+    :param light_source: Incident light color RGB (default white)
+    :param background: Background/base color RGB (default white)
+    :param absorption_factor: Absorption strength (None = use global default)
+    :param scatter_contribution: Scatter color contribution (None = use global default)
+    :return: Reflected color RGB (uint8)
+    """
+    # Use global defaults if not specified
+    abs_factor = absorption_factor if absorption_factor is not None else ABSORPTION_FACTOR
+    scat_contrib = scatter_contribution if scatter_contribution is not None else SCATTER_CONTRIBUTION
+    
+    # Normalize to 0-1
+    current_light = np.array(light_source, dtype=np.float64) / 255.0
+    bg_color = np.array(background, dtype=np.float64) / 255.0
+    
+    ref_thickness = 0.08  # Reference layer height (mm)
+    
+    # Accumulated color from all layers (subtractive mixing)
+    total_absorption = np.ones(3, dtype=np.float64)
+    total_scatter = np.zeros(3, dtype=np.float64)
+    
+    for layer in layers:
+        # Parse color
+        r, g, b = parse_color(layer['color'])
+        material_color = np.array([r, g, b], dtype=np.float64) / 255.0
+        
+        opacity = layer['opacity']
+        thickness = layer.get('thickness', ref_thickness)
+        
+        if thickness <= 0:
+            continue
+        
+        # Effective scatter rate based on thickness
+        scatter = 1.0 - (1.0 - opacity) ** (thickness / ref_thickness)
+        
+        # Absorption coefficient = complement of material color
+        # White material = no absorption, Blue material = absorbs R,G
+        absorption_coeff = 1.0 - material_color
+        
+        # Single-pass absorption using Beer-Lambert
+        single_pass = np.exp(-absorption_coeff * scatter * abs_factor)
+        
+        # Accumulate absorption (multiplicative)
+        total_absorption *= single_pass
+        
+        # Accumulate scatter color contribution
+        total_scatter += material_color * scatter * scat_contrib
+    
+    # Double-pass: light goes through layers twice (in and back out)
+    # This is what makes reflected colors more saturated than transmitted
+    double_pass_absorption = total_absorption ** 2
+    
+    # Light reflects off background
+    reflected = current_light * double_pass_absorption * bg_color
+    
+    # Add scattered light contribution (tinting from materials)
+    # Scattered light also undergoes double-pass
+    scattered_contribution = total_scatter * np.mean(current_light) * 0.5
+    
+    # Combine reflected and scattered components
+    final_color = reflected * 0.7 + scattered_contribution * 0.3
+    
+    # Ensure not exceeding 1
+    final_color = np.clip(final_color, 0, 1)
+    
+    # Convert back to 0-255
+    return np.clip(final_color * 255, 0, 255).astype(np.uint8)
+
+
 def calculate_palette_preview(materials: list[dict], total_layers: int = 5, layer_height: float = 0.08) -> list:
     """
     预览所有可能的颜色组合（用于调试）
