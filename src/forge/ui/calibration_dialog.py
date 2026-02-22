@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 
 from forge.core.calibration import CalibrationGenerator, CalibrationSolver, OpticsCalibrationSolver
+from forge.core.settings import get_settings_manager
 
 
 class ClickableImageLabel(QLabel):
@@ -331,7 +332,8 @@ class CalibrationDialog(QDialog):
             text += "光学参数:\n"
             text += f"  absorption_factor: {optics_params['absorption_factor']:.3f}\n"
             text += f"  scatter_contribution: {optics_params['scatter_contribution']:.3f}\n"
-            text += f"  scatter_blend: {optics_params['scatter_blend']:.3f}\n\n"
+            text += f"  scatter_blend: {optics_params['scatter_blend']:.3f}\n"
+            text += f"  absorption_gamma: {optics_params['absorption_gamma']:.3f}\n\n"
             text += "材料参数:\n"
             for m in optimized:
                 text += f"  {m['name']}: Opacity={m['opacity']:.2f}, Color={m['color']}\n"
@@ -352,5 +354,10 @@ class CalibrationDialog(QDialog):
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
+                # Save optical params to persistent settings
+                if hasattr(self, 'optimized_optics'):
+                    settings = get_settings_manager()
+                    settings.set_optical_params(self.optimized_optics)
+                
                 self.materials_updated.emit(self.optimized_materials)
                 self.close()
