@@ -335,16 +335,26 @@ class OpticsCalibrationSolver:
                 delta_e = ciede2000_distance(sim_lab[np.newaxis, :], meas_lab[np.newaxis, :])
                 total_error += float(delta_e[0]) ** 2
             
-            return total_error
+            # Regularization: softly penalize extreme parameters to prevent
+            # degenerate solutions (e.g., extreme absorption + extreme specular)
+            n_obs = max(len(valid_obs), 1)
+            reg_weight = 0.5 * n_obs  # scale with number of observations
+            reg = reg_weight * (
+                ((abs_factor - 2.0) / 3.0) ** 2 +   # prefer moderate absorption
+                ((gamma - 0.8) / 0.5) ** 2 +          # prefer gamma near 0.8
+                ((scat_blend - 0.05) / 0.1) ** 2      # prefer low specular
+            )
+            
+            return total_error + reg
         
         # Optimize using global optimizer (differential_evolution)
         from scipy.optimize import differential_evolution
         
         bounds = [
-            (0.1, 10.0),   # absorption_factor
-            (0.01, 2.0),   # scatter_contribution
-            (0.0, 0.3),    # scatter_blend (surface specular)
-            (0.3, 2.0),    # absorption_gamma
+            (0.5, 8.0),    # absorption_factor
+            (0.05, 2.0),   # scatter_contribution
+            (0.0, 0.15),   # scatter_blend (surface specular, matte PLA)
+            (0.4, 1.5),    # absorption_gamma
         ]
         result = differential_evolution(
             loss_function, bounds,
@@ -355,10 +365,10 @@ class OpticsCalibrationSolver:
         )
         
         optimized_params = {
-            'absorption_factor': float(np.clip(result.x[0], 0.1, 10.0)),
-            'scatter_contribution': float(np.clip(result.x[1], 0.01, 2.0)),
-            'scatter_blend': float(np.clip(result.x[2], 0.0, 0.3)),
-            'absorption_gamma': float(np.clip(result.x[3], 0.3, 2.0))
+            'absorption_factor': float(np.clip(result.x[0], 0.5, 8.0)),
+            'scatter_contribution': float(np.clip(result.x[1], 0.05, 2.0)),
+            'scatter_blend': float(np.clip(result.x[2], 0.0, 0.15)),
+            'absorption_gamma': float(np.clip(result.x[3], 0.4, 1.5))
         }
         
         # Apply the optimized parameters globally
