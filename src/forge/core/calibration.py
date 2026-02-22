@@ -7,7 +7,7 @@ import cv2
 from scipy.optimize import minimize
 from .color_model import ColorModel
 from .exporter import Exporter
-from .optics import calculate_transmitted_color, get_optical_params, set_optical_params
+from .optics import calculate_reflected_color, set_optical_params
 
 class CalibrationGenerator:
     """Generates calibration 3MF and preview images."""
@@ -64,7 +64,7 @@ class CalibrationGenerator:
                  for _ in range(rem):
                     layers_optics.append({'color': materials[0]['color'], 'opacity': materials[0]['opacity'], 'thickness': 0.08})
             
-            rgb = calculate_transmitted_color(layers_optics)
+            rgb = calculate_reflected_color(layers_optics)
             preview_image[row, col] = rgb
             
         return preview_image
@@ -181,7 +181,7 @@ class CalibrationSolver:
                     for _ in range(rem):
                         layers_optics.append({'color': hex_to_rgb(temp_materials[0]['color']), 'opacity': temp_materials[0]['opacity'], 'thickness': 0.08})
                         
-                simulated_rgb = calculate_transmitted_color(layers_optics)
+                simulated_rgb = calculate_reflected_color(layers_optics)
                 
                 # Convert to LAB for CIEDE2000 comparison
                 sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.uint8)
@@ -307,21 +307,9 @@ class OpticsCalibrationSolver:
                     })
             return layers_optics
         
-        # Initial guess for optical params
-        current_params = get_optical_params()
-        x0 = [
-            current_params['absorption_factor'],
-            current_params['scatter_contribution'],
-            current_params['scatter_blend']
-        ]
-        
+
         def loss_function(params):
             abs_factor, scat_contrib, scat_blend = params
-            
-            # Constrain to valid ranges
-            abs_factor = max(0.01, min(2.0, abs_factor))
-            scat_contrib = max(0.01, min(2.0, scat_contrib))
-            scat_blend = max(0.01, min(1.0, scat_blend))
             
             total_error = 0.0
             
@@ -329,7 +317,7 @@ class OpticsCalibrationSolver:
                 layers = build_layers(counts)
                 
                 # Simulate color with current optical params
-                simulated_rgb = calculate_transmitted_color(
+                simulated_rgb = calculate_reflected_color(
                     layers,
                     absorption_factor=abs_factor,
                     scatter_contribution=scat_contrib,
@@ -348,14 +336,23 @@ class OpticsCalibrationSolver:
             
             return total_error
         
-        # Optimize
-        bounds = [(0.01, 2.0), (0.01, 2.0), (0.01, 1.0)]
-        result = minimize(loss_function, x0, bounds=bounds, method='L-BFGS-B')
+        # Optimize using global optimizer (differential_evolution)
+        # L-BFGS-B gets stuck in local optima with K-M model's non-smooth loss surface
+        from scipy.optimize import differential_evolution
+        
+        bounds = [(0.1, 5.0), (0.01, 2.0), (0.0, 0.5)]
+        result = differential_evolution(
+            loss_function, bounds,
+            seed=42,
+            maxiter=200,
+            tol=1e-6,
+            polish=True  # refine with L-BFGS-B at the end
+        )
         
         optimized_params = {
-            'absorption_factor': float(np.clip(result.x[0], 0.01, 2.0)),
+            'absorption_factor': float(np.clip(result.x[0], 0.1, 5.0)),
             'scatter_contribution': float(np.clip(result.x[1], 0.01, 2.0)),
-            'scatter_blend': float(np.clip(result.x[2], 0.01, 1.0))
+            'scatter_blend': float(np.clip(result.x[2], 0.0, 0.5))
         }
         
         # Apply the optimized parameters globally
