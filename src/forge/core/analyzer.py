@@ -95,7 +95,7 @@ class Analyzer:
         self.image = img
         
     def process(self, settings: dict, materials: list[dict], 
-                width_mm: float = 100, pixel_size_mm: float = 0.6,
+                width_mm: float = 100, pixel_size_mm: float = 0.4,
                 layer_height_mm: float = 0.08, layers: int = 5,
                 base_thickness_mm: float = 0.0):
         """执行处理流程"""

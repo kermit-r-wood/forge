@@ -93,6 +93,15 @@ class SettingsManager:
         self._settings['output'] = output
         self._save_settings()
 
+    def get_optical_params(self) -> dict:
+        """Get optical model parameters"""
+        return self._settings.get('optical_params', {})
+
+    def set_optical_params(self, params: dict):
+        """Save optical model parameters"""
+        self._settings['optical_params'] = params
+        self._save_settings()
+
 
 # Global singleton instance
 _settings_manager = None

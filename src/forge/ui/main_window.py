@@ -20,6 +20,7 @@ from ctypes import wintypes
 from forge.core.analyzer import Analyzer
 from forge.core.exporter import Exporter
 from forge.core.settings import get_settings_manager
+from forge.core.optics import set_optical_params
 
 class SafeComboBox(QComboBox):
     """防止误触滚轮的 ComboBox"""
@@ -378,7 +379,7 @@ class OutputPanel(QGroupBox):
         pixel_layout.addWidget(QLabel("像素大小 (mm):"))
         self.pixel_spin = SafeDoubleSpinBox()
         self.pixel_spin.setRange(0.2, 1.0)
-        self.pixel_spin.setValue(0.6)  # LD_ColorLayering 默认值
+        self.pixel_spin.setValue(0.4)
         self.pixel_spin.setSingleStep(0.1)
         self.pixel_spin.setToolTip("每个像素对应的立方体边长。\nLD_ColorLayering 使用 0.6mm。")
         pixel_layout.addWidget(self.pixel_spin)
@@ -400,8 +401,8 @@ class OutputPanel(QGroupBox):
         self.layers_spin = SafeDoubleSpinBox()
         self.layers_spin.setDecimals(0)
         self.layers_spin.setRange(3, 8)
-        self.layers_spin.setValue(3)  # LD_ColorLayering 默认值
-        self.layers_spin.setToolTip("颜色层数。LD_ColorLayering 使用 3 层。")
+        self.layers_spin.setValue(4)
+        self.layers_spin.setToolTip("颜色层数。")
         layers_layout.addWidget(self.layers_spin)
         layout.addLayout(layers_layout)
         
@@ -496,7 +497,7 @@ class ExportThread(QThread):
                 self.file_path,
                 layer_data,
                 self.materials,
-                pixel_size_mm=self.output_settings.get('pixel_size_mm', 0.6),
+                pixel_size_mm=self.output_settings.get('pixel_size_mm', 0.4),
                 layer_height_mm=self.output_settings['layer_height_mm'],
                 rgb_image=rgb_image,
                 base_thickness_mm=self.output_settings.get('base_thickness_mm', 0.0),
@@ -529,6 +530,7 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
         self._apply_dark_theme()
         self._set_windows_dark_title_bar()
+        self._load_optical_params()
 
     def _set_windows_dark_title_bar(self):
         """设置 Windows 10/11 原生黑色标题栏"""
@@ -547,6 +549,13 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass # Non-Windows or older version
+
+    def _load_optical_params(self):
+        """Load saved optical parameters from settings"""
+        settings = get_settings_manager()
+        saved_params = settings.get_optical_params()
+        if saved_params:
+            set_optical_params(**saved_params)
 
     def _setup_menu(self):
         """设置菜单栏"""
