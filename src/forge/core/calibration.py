@@ -55,14 +55,17 @@ class CalibrationGenerator:
             for _ in range(y):
                 layers_optics.append({'color': materials[3]['color'], 'opacity': materials[3]['opacity'], 'thickness': 0.08})
                 
-            # White filler? Optics function assumes white light source, so empty layers don't change anything unless they have opacity.
-            # But the White material (materials[0]) has opacity!
-            # We should fill the rest with White layers to match physical print.
+            # Fill remaining color layers with White
             stack_len = c + m + y
             rem = 5 - stack_len
             if rem > 0:
                  for _ in range(rem):
                     layers_optics.append({'color': materials[0]['color'], 'opacity': materials[0]['opacity'], 'thickness': 0.08})
+            
+            # Add base plate layers (0.4mm / 0.08mm = 5 layers of white)
+            base_layers = int(round(0.4 / 0.08))
+            for _ in range(base_layers):
+                layers_optics.append({'color': materials[0]['color'], 'opacity': materials[0]['opacity'], 'thickness': 0.08})
             
             rgb = calculate_reflected_color(layers_optics)
             preview_image[row, col] = rgb
@@ -102,7 +105,8 @@ class CalibrationGenerator:
         rgb_image = CalibrationGenerator.generate_preview(materials, patch_defs)
                 
         exporter = Exporter()
-        exporter.export(file_path, layer_data, materials, pixel_size_mm=10.0, rgb_image=rgb_image)
+        exporter.export(file_path, layer_data, materials, pixel_size_mm=10.0,
+                        rgb_image=rgb_image, base_thickness_mm=0.4, invert_z=True)
 
 
 class CalibrationSolver:
@@ -293,18 +297,26 @@ class OpticsCalibrationSolver:
                     'opacity': materials[3]['opacity'], 
                     'thickness': 0.08
                 })
-            # Fill with white
+            # Fill remaining color layers with white
             rem = 5 - (c + m + y)
+            mat0_color = materials[0]['color']
+            if isinstance(mat0_color, str):
+                mat0_color = hex_to_rgb(mat0_color)
             if rem > 0:
-                mat0_color = materials[0]['color']
-                if isinstance(mat0_color, str):
-                    mat0_color = hex_to_rgb(mat0_color)
                 for _ in range(rem):
                     layers_optics.append({
                         'color': mat0_color,
                         'opacity': materials[0]['opacity'],
                         'thickness': 0.08
                     })
+            # Add base plate layers (0.4mm / 0.08mm = 5 layers of white)
+            base_layers = int(round(0.4 / 0.08))
+            for _ in range(base_layers):
+                layers_optics.append({
+                    'color': mat0_color,
+                    'opacity': materials[0]['opacity'],
+                    'thickness': 0.08
+                })
             return layers_optics
         
 
