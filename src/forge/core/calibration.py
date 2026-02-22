@@ -309,7 +309,7 @@ class OpticsCalibrationSolver:
         
 
         def loss_function(params):
-            abs_factor, scat_contrib, scat_blend = params
+            abs_factor, scat_contrib, scat_blend, gamma = params
             
             total_error = 0.0
             
@@ -321,7 +321,8 @@ class OpticsCalibrationSolver:
                     layers,
                     absorption_factor=abs_factor,
                     scatter_contribution=scat_contrib,
-                    scatter_blend=scat_blend
+                    scatter_blend=scat_blend,
+                    absorption_gamma=gamma
                 )
                 
                 # Convert to LAB for CIEDE2000
@@ -337,22 +338,27 @@ class OpticsCalibrationSolver:
             return total_error
         
         # Optimize using global optimizer (differential_evolution)
-        # L-BFGS-B gets stuck in local optima with K-M model's non-smooth loss surface
         from scipy.optimize import differential_evolution
         
-        bounds = [(0.1, 5.0), (0.01, 2.0), (0.0, 0.5)]
+        bounds = [
+            (0.1, 10.0),   # absorption_factor
+            (0.01, 2.0),   # scatter_contribution
+            (0.0, 0.3),    # scatter_blend (surface specular)
+            (0.3, 2.0),    # absorption_gamma
+        ]
         result = differential_evolution(
             loss_function, bounds,
             seed=42,
-            maxiter=200,
+            maxiter=300,
             tol=1e-6,
-            polish=True  # refine with L-BFGS-B at the end
+            polish=True
         )
         
         optimized_params = {
-            'absorption_factor': float(np.clip(result.x[0], 0.1, 5.0)),
+            'absorption_factor': float(np.clip(result.x[0], 0.1, 10.0)),
             'scatter_contribution': float(np.clip(result.x[1], 0.01, 2.0)),
-            'scatter_blend': float(np.clip(result.x[2], 0.0, 0.5))
+            'scatter_blend': float(np.clip(result.x[2], 0.0, 0.3)),
+            'absorption_gamma': float(np.clip(result.x[3], 0.3, 2.0))
         }
         
         # Apply the optimized parameters globally

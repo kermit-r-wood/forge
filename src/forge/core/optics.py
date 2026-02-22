@@ -10,14 +10,21 @@ import numpy as np
 # These can be optimized by the calibration solver to match actual print results.
 # Default values are optimized for solid background (reflected light) viewing.
 
-# Absorption factor: Scales the K coefficient in K-M theory (higher = stronger selective absorption = more saturated colors)
+# Absorption factor: Scales the K coefficient in K-M theory (higher = more saturated)
 ABSORPTION_FACTOR = 1.0
 
-# Scatter contribution: Scales the S coefficient in K-M theory (higher = more scattering = lighter/whiter appearance)
+# Scatter contribution: Scales the S coefficient in K-M theory (higher = lighter/whiter)
 SCATTER_CONTRIBUTION = 0.15
 
-# Scatter blend: Surface reflection factor (Fresnel-like, 0.0 = no surface reflection, higher = more white wash)
+# Scatter blend: Surface specular reflection factor (Fresnel-like, 0.0 = matte, higher = glossier)
 SCATTER_BLEND = 0.02
+
+# Absorption gamma: Power-law exponent for absorption mapping.
+# Controls how partial absorption values (1-color) are transformed.
+# gamma < 1: amplifies partial absorption, improves mixed-color fidelity
+# gamma = 1: linear (original behavior)
+# gamma > 1: suppresses partial absorption, more binary colors
+ABSORPTION_GAMMA = 0.6
 
 
 def get_optical_params() -> dict:
@@ -25,19 +32,23 @@ def get_optical_params() -> dict:
     return {
         'absorption_factor': ABSORPTION_FACTOR,
         'scatter_contribution': SCATTER_CONTRIBUTION,
-        'scatter_blend': SCATTER_BLEND
+        'scatter_blend': SCATTER_BLEND,
+        'absorption_gamma': ABSORPTION_GAMMA
     }
 
 
-def set_optical_params(absorption_factor: float = None, scatter_contribution: float = None, scatter_blend: float = None):
+def set_optical_params(absorption_factor: float = None, scatter_contribution: float = None,
+                       scatter_blend: float = None, absorption_gamma: float = None):
     """Set optical model parameters globally."""
-    global ABSORPTION_FACTOR, SCATTER_CONTRIBUTION, SCATTER_BLEND
+    global ABSORPTION_FACTOR, SCATTER_CONTRIBUTION, SCATTER_BLEND, ABSORPTION_GAMMA
     if absorption_factor is not None:
         ABSORPTION_FACTOR = absorption_factor
     if scatter_contribution is not None:
         SCATTER_CONTRIBUTION = scatter_contribution
     if scatter_blend is not None:
         SCATTER_BLEND = scatter_blend
+    if absorption_gamma is not None:
+        ABSORPTION_GAMMA = absorption_gamma
 
 
 def parse_color(color) -> tuple:
@@ -126,16 +137,17 @@ def calculate_transmitted_color(
 
 
 def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
-                  abs_factor: float, scat_contrib: float, ref_thickness: float = 0.08):
+                  abs_factor: float, scat_contrib: float, gamma: float = 0.6,
+                  ref_thickness: float = 0.08):
     """
     Compute per-channel Kubelka-Munk reflectance (R) and transmittance (T) for a single layer.
     
-    K-M two-flux theory:
-      K_c = abs_factor * (1 - color_c) * opacity / ref_thickness   (absorption, per channel)
-      S   = scat_contrib * opacity / ref_thickness                  (scattering, achromatic)
+    K-M two-flux theory with power-law absorption:
+      K_c = abs_factor * ((1 - color_c) ** gamma) * opacity / ref_thickness
+      S   = scat_contrib * opacity / ref_thickness
     
+    gamma < 1 amplifies partial absorption, improving mixed-color fidelity.
     Both K and S scale with opacity: transparent material (opacity=0) is invisible.
-    K/S ratio = abs_factor * (1 - color_c) / scat_contrib, independent of opacity.
     
     For a layer of given thickness X:
       a = 1 + K/S,  b = sqrt(a^2 - 1)
@@ -144,9 +156,11 @@ def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
     """
     EPS = 1e-10
     
-    # Per-channel absorption coefficient (per unit thickness)
-    # Both K and S include opacity so transparent layers are invisible
-    K = abs_factor * (1.0 - material_color) * opacity / ref_thickness  # shape (3,)
+    # Per-channel absorption coefficient with power-law mapping
+    # gamma < 1 amplifies weak absorption (e.g., 0.1^0.6 = 0.25 vs linear 0.1)
+    absorption_raw = 1.0 - material_color  # complement of color
+    absorption_mapped = np.power(np.maximum(absorption_raw, 0.0), gamma)
+    K = abs_factor * absorption_mapped * opacity / ref_thickness  # shape (3,)
     
     # Achromatic scattering coefficient (per unit thickness)
     S_val = scat_contrib * opacity / ref_thickness  # scalar
@@ -156,7 +170,6 @@ def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
     
     if S_val < EPS:
         # No scattering: pure absorption, no reflection from this layer
-        # R = 0, T = exp(-K * thickness)
         T = np.exp(-K * thickness)
         return R, T
     
@@ -166,8 +179,7 @@ def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
         b_sq = a * a - 1.0
         
         if b_sq < EPS:
-            # b ~ 0: K ~ 0 for this channel, pure scattering (white-like)
-            # Limit: R = S*X/(1+S*X), T = 1/(1+S*X)
+            # b ~ 0: K ~ 0 for this channel, pure scattering
             st = S_val * thickness
             R[c] = st / (1.0 + st)
             T[c] = 1.0 / (1.0 + st)
@@ -176,9 +188,6 @@ def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
             arg = b * S_val * thickness
             
             if arg > 500:
-                # Overflow guard: for very thick/absorbing layers
-                # sinh(x) ~ cosh(x) ~ exp(x)/2 for large x
-                # R -> 1/a = a - b (the R_inf limit), T -> 0
                 R[c] = a - b
                 T[c] = 0.0
             else:
@@ -202,7 +211,8 @@ def calculate_reflected_color(
     background: tuple = (255, 255, 255),
     absorption_factor: float = None,
     scatter_contribution: float = None,
-    scatter_blend: float = None
+    scatter_blend: float = None,
+    absorption_gamma: float = None
 ) -> np.ndarray:
     """
     Calculate the color seen when light reflects off stacked material layers.
@@ -210,20 +220,22 @@ def calculate_reflected_color(
     Uses Kubelka-Munk two-flux theory with layer composition:
     - Each layer has per-channel reflectance R and transmittance T
     - Layers are composed bottom-up using K-M stacking formula
-    - The formula accounts for inter-layer multiple reflections
+    - Power-law gamma controls absorption curve shape
     
     :param layers: Material layers list (top to bottom, viewer to base)
     :param light_source: Incident light color RGB (default white)
     :param background: Background/base color RGB (default white)
     :param absorption_factor: Absorption strength scaling K (None = use global default)
     :param scatter_contribution: Scattering strength scaling S (None = use global default)
-    :param scatter_blend: Surface reflection factor (None = use global default)
+    :param scatter_blend: Surface specular reflection factor (None = use global default)
+    :param absorption_gamma: Power-law exponent for absorption (None = use global default)
     :return: Reflected color RGB (uint8)
     """
     # Use global defaults if not specified
     abs_factor = absorption_factor if absorption_factor is not None else ABSORPTION_FACTOR
     scat_contrib = scatter_contribution if scatter_contribution is not None else SCATTER_CONTRIBUTION
     scat_blend = scatter_blend if scatter_blend is not None else SCATTER_BLEND
+    gamma = absorption_gamma if absorption_gamma is not None else ABSORPTION_GAMMA
     
     # Normalize to 0-1
     light = np.array(light_source, dtype=np.float64) / 255.0
@@ -232,7 +244,6 @@ def calculate_reflected_color(
     ref_thickness = 0.08  # Reference layer height (mm)
     
     # Start with opaque background substrate
-    # R_stack = background reflectance (per channel), T_stack = 0 (opaque)
     R_stack = bg_color.copy()
     T_stack = np.zeros(3, dtype=np.float64)
     
@@ -249,13 +260,12 @@ def calculate_reflected_color(
         
         # Compute K-M reflectance and transmittance for this layer
         R_layer, T_layer = _km_layer_RT(material_color, opacity, thickness,
-                                         abs_factor, scat_contrib, ref_thickness)
+                                         abs_factor, scat_contrib, gamma,
+                                         ref_thickness)
         
         # K-M layer composition: add this layer on top of current stack
-        # R_new = R_layer + T_layer^2 * R_stack / (1 - R_layer * R_stack)
-        # T_new = T_layer * T_stack / (1 - R_layer * R_stack)
         denom = 1.0 - R_layer * R_stack
-        denom = np.maximum(denom, 1e-10)  # avoid division by zero
+        denom = np.maximum(denom, 1e-10)
         
         R_new = R_layer + T_layer * T_layer * R_stack / denom
         T_new = T_layer * T_stack / denom
@@ -263,13 +273,14 @@ def calculate_reflected_color(
         R_stack = R_new
         T_stack = T_new
     
-    # Final reflected color = light * R_stack
-    reflected = light * R_stack
+    # Body reflection: light enters material and reflects via K-M stack
+    body = (1.0 - scat_blend) * light * R_stack
     
-    # Surface reflection: small fraction of light reflects off surface without
-    # entering material (Fresnel-like). scatter_blend controls this.
-    light_normalized = light * np.mean(bg_color)
-    final_color = (1.0 - scat_blend) * reflected + scat_blend * light_normalized
+    # Surface specular: fraction of light reflects off surface without entering
+    # This is additive (highlights) not multiplicative (desaturating)
+    specular = scat_blend * light
+    
+    final_color = body + specular
     
     # Clamp and convert to 0-255
     final_color = np.clip(final_color, 0, 1)
