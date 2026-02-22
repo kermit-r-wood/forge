@@ -131,8 +131,11 @@ def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
     Compute per-channel Kubelka-Munk reflectance (R) and transmittance (T) for a single layer.
     
     K-M two-flux theory:
-      K_c = abs_factor * (1 - color_c) / ref_thickness   (absorption per unit thickness, per channel)
-      S   = scat_contrib * opacity / ref_thickness        (scattering per unit thickness, achromatic)
+      K_c = abs_factor * (1 - color_c) * opacity / ref_thickness   (absorption, per channel)
+      S   = scat_contrib * opacity / ref_thickness                  (scattering, achromatic)
+    
+    Both K and S scale with opacity: transparent material (opacity=0) is invisible.
+    K/S ratio = abs_factor * (1 - color_c) / scat_contrib, independent of opacity.
     
     For a layer of given thickness X:
       a = 1 + K/S,  b = sqrt(a^2 - 1)
@@ -142,7 +145,8 @@ def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
     EPS = 1e-10
     
     # Per-channel absorption coefficient (per unit thickness)
-    K = abs_factor * (1.0 - material_color) / ref_thickness  # shape (3,)
+    # Both K and S include opacity so transparent layers are invisible
+    K = abs_factor * (1.0 - material_color) * opacity / ref_thickness  # shape (3,)
     
     # Achromatic scattering coefficient (per unit thickness)
     S_val = scat_contrib * opacity / ref_thickness  # scalar
