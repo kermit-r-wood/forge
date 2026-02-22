@@ -10,14 +10,14 @@ import numpy as np
 # These can be optimized by the calibration solver to match actual print results.
 # Default values are optimized for solid background (reflected light) viewing.
 
-# Absorption factor: Controls color absorption strength (0.0 = no absorption, 1.0 = full Beer-Lambert)
-ABSORPTION_FACTOR = 0.5
+# Absorption factor: Scales the K coefficient in K-M theory (higher = stronger selective absorption = more saturated colors)
+ABSORPTION_FACTOR = 1.0
 
-# Scatter contribution: Controls how much material color tints the light (0.0 = none, 1.0 = full)  
-SCATTER_CONTRIBUTION = 0.5
+# Scatter contribution: Scales the S coefficient in K-M theory (higher = more scattering = lighter/whiter appearance)
+SCATTER_CONTRIBUTION = 0.15
 
-# Scatter blend: Controls mixing ratio of transmitted vs scattered light (0.0 = all transmitted, 1.0 = all scattered)
-SCATTER_BLEND = 0.15
+# Scatter blend: Surface reflection factor (Fresnel-like, 0.0 = no surface reflection, higher = more white wash)
+SCATTER_BLEND = 0.02
 
 
 def get_optical_params() -> dict:
