@@ -125,46 +125,115 @@ def calculate_transmitted_color(
     return np.clip(current_light * 255, 0, 255).astype(np.uint8)
 
 
+def _km_layer_RT(material_color: np.ndarray, opacity: float, thickness: float,
+                  abs_factor: float, scat_contrib: float, ref_thickness: float = 0.08):
+    """
+    Compute per-channel Kubelka-Munk reflectance (R) and transmittance (T) for a single layer.
+    
+    K-M two-flux theory:
+      K_c = abs_factor * (1 - color_c) / ref_thickness   (absorption per unit thickness, per channel)
+      S   = scat_contrib * opacity / ref_thickness        (scattering per unit thickness, achromatic)
+    
+    For a layer of given thickness X:
+      a = 1 + K/S,  b = sqrt(a^2 - 1)
+      R = sinh(bSX) / (a*sinh(bSX) + b*cosh(bSX))
+      T = b / (a*sinh(bSX) + b*cosh(bSX))
+    """
+    EPS = 1e-10
+    
+    # Per-channel absorption coefficient (per unit thickness)
+    K = abs_factor * (1.0 - material_color) / ref_thickness  # shape (3,)
+    
+    # Achromatic scattering coefficient (per unit thickness)
+    S_val = scat_contrib * opacity / ref_thickness  # scalar
+    
+    R = np.zeros(3, dtype=np.float64)
+    T = np.ones(3, dtype=np.float64)
+    
+    if S_val < EPS:
+        # No scattering: pure absorption, no reflection from this layer
+        # R = 0, T = exp(-K * thickness)
+        T = np.exp(-K * thickness)
+        return R, T
+    
+    for c in range(3):
+        k = K[c]
+        a = 1.0 + k / S_val
+        b_sq = a * a - 1.0
+        
+        if b_sq < EPS:
+            # b ~ 0: K ~ 0 for this channel, pure scattering (white-like)
+            # Limit: R = S*X/(1+S*X), T = 1/(1+S*X)
+            st = S_val * thickness
+            R[c] = st / (1.0 + st)
+            T[c] = 1.0 / (1.0 + st)
+        else:
+            b = np.sqrt(b_sq)
+            arg = b * S_val * thickness
+            
+            if arg > 500:
+                # Overflow guard: for very thick/absorbing layers
+                # sinh(x) ~ cosh(x) ~ exp(x)/2 for large x
+                # R -> 1/a = a - b (the R_inf limit), T -> 0
+                R[c] = a - b
+                T[c] = 0.0
+            else:
+                sinh_arg = np.sinh(arg)
+                cosh_arg = np.cosh(arg)
+                denom = a * sinh_arg + b * cosh_arg
+                
+                if denom < EPS:
+                    R[c] = 0.0
+                    T[c] = 0.0
+                else:
+                    R[c] = sinh_arg / denom
+                    T[c] = b / denom
+    
+    return R, T
+
+
 def calculate_reflected_color(
     layers: list[dict], 
     light_source: tuple = (255, 255, 255),
     background: tuple = (255, 255, 255),
     absorption_factor: float = None,
-    scatter_contribution: float = None
+    scatter_contribution: float = None,
+    scatter_blend: float = None
 ) -> np.ndarray:
     """
     Calculate the color seen when light reflects off stacked material layers.
     
-    In reflected light mode (solid background viewing):
-    - Light enters from the front (viewer side)
-    - Passes through material layers, being absorbed
-    - Reflects off the background (bottom layer / base)
-    - Passes through layers again on the way back
-    - Double-pass absorption results in more saturated colors
+    Uses Kubelka-Munk two-flux theory with layer composition:
+    - Each layer has per-channel reflectance R and transmittance T
+    - Layers are composed bottom-up using K-M stacking formula
+    - The formula accounts for inter-layer multiple reflections
     
     :param layers: Material layers list (top to bottom, viewer to base)
     :param light_source: Incident light color RGB (default white)
     :param background: Background/base color RGB (default white)
-    :param absorption_factor: Absorption strength (None = use global default)
-    :param scatter_contribution: Scatter color contribution (None = use global default)
+    :param absorption_factor: Absorption strength scaling K (None = use global default)
+    :param scatter_contribution: Scattering strength scaling S (None = use global default)
+    :param scatter_blend: Surface reflection factor (None = use global default)
     :return: Reflected color RGB (uint8)
     """
     # Use global defaults if not specified
     abs_factor = absorption_factor if absorption_factor is not None else ABSORPTION_FACTOR
     scat_contrib = scatter_contribution if scatter_contribution is not None else SCATTER_CONTRIBUTION
+    scat_blend = scatter_blend if scatter_blend is not None else SCATTER_BLEND
     
     # Normalize to 0-1
-    current_light = np.array(light_source, dtype=np.float64) / 255.0
+    light = np.array(light_source, dtype=np.float64) / 255.0
     bg_color = np.array(background, dtype=np.float64) / 255.0
     
     ref_thickness = 0.08  # Reference layer height (mm)
     
-    # Accumulated color from all layers (subtractive mixing)
-    total_absorption = np.ones(3, dtype=np.float64)
-    total_scatter = np.zeros(3, dtype=np.float64)
+    # Start with opaque background substrate
+    # R_stack = background reflectance (per channel), T_stack = 0 (opaque)
+    R_stack = bg_color.copy()
+    T_stack = np.zeros(3, dtype=np.float64)
     
-    for layer in layers:
-        # Parse color
+    # Stack layers bottom-up: iterate in reverse (layers[0] = top/viewer side)
+    for layer in reversed(layers):
         r, g, b = parse_color(layer['color'])
         material_color = np.array([r, g, b], dtype=np.float64) / 255.0
         
@@ -174,40 +243,32 @@ def calculate_reflected_color(
         if thickness <= 0:
             continue
         
-        # Effective scatter rate based on thickness
-        scatter = 1.0 - (1.0 - opacity) ** (thickness / ref_thickness)
+        # Compute K-M reflectance and transmittance for this layer
+        R_layer, T_layer = _km_layer_RT(material_color, opacity, thickness,
+                                         abs_factor, scat_contrib, ref_thickness)
         
-        # Absorption coefficient = complement of material color
-        # White material = no absorption, Blue material = absorbs R,G
-        absorption_coeff = 1.0 - material_color
+        # K-M layer composition: add this layer on top of current stack
+        # R_new = R_layer + T_layer^2 * R_stack / (1 - R_layer * R_stack)
+        # T_new = T_layer * T_stack / (1 - R_layer * R_stack)
+        denom = 1.0 - R_layer * R_stack
+        denom = np.maximum(denom, 1e-10)  # avoid division by zero
         
-        # Single-pass absorption using Beer-Lambert
-        single_pass = np.exp(-absorption_coeff * scatter * abs_factor)
+        R_new = R_layer + T_layer * T_layer * R_stack / denom
+        T_new = T_layer * T_stack / denom
         
-        # Accumulate absorption (multiplicative)
-        total_absorption *= single_pass
-        
-        # Accumulate scatter color contribution
-        total_scatter += material_color * scatter * scat_contrib
+        R_stack = R_new
+        T_stack = T_new
     
-    # Double-pass: light goes through layers twice (in and back out)
-    # This is what makes reflected colors more saturated than transmitted
-    double_pass_absorption = total_absorption ** 2
+    # Final reflected color = light * R_stack
+    reflected = light * R_stack
     
-    # Light reflects off background
-    reflected = current_light * double_pass_absorption * bg_color
+    # Surface reflection: small fraction of light reflects off surface without
+    # entering material (Fresnel-like). scatter_blend controls this.
+    light_normalized = light * np.mean(bg_color)
+    final_color = (1.0 - scat_blend) * reflected + scat_blend * light_normalized
     
-    # Add scattered light contribution (tinting from materials)
-    # Scattered light also undergoes double-pass
-    scattered_contribution = total_scatter * np.mean(current_light) * 0.5
-    
-    # Combine reflected and scattered components
-    final_color = reflected * 0.7 + scattered_contribution * 0.3
-    
-    # Ensure not exceeding 1
+    # Clamp and convert to 0-255
     final_color = np.clip(final_color, 0, 1)
-    
-    # Convert back to 0-255
     return np.clip(final_color * 255, 0, 255).astype(np.uint8)
 
 
@@ -232,7 +293,7 @@ def calculate_palette_preview(materials: list[dict], total_layers: int = 5, laye
                 'thickness': layer_height
             })
         
-        color = calculate_transmitted_color(layers_data)
+        color = calculate_reflected_color(layers_data)
         samples.append({
             'combo': combo,
             'color': tuple(color.tolist())
