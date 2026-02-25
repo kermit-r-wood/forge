@@ -417,16 +417,6 @@ class OutputPanel(QGroupBox):
         base_layout.addWidget(self.base_spin)
         layout.addLayout(base_layout)
         
-        # 贪婪网格合并开关
-        self.greedy_mesh_checkbox = QCheckBox("贪婪网格合并 (优化网格)")
-        self.greedy_mesh_checkbox.setChecked(False)
-        self.greedy_mesh_checkbox.setToolTip(
-            "启用后将相邻相同材料像素合并为更大的矩形块。\n"
-            "可减少网格复杂度，但可能影响打印效果。\n"
-            "如果打印出现问题，请尝试关闭此选项。"
-        )
-        layout.addWidget(self.greedy_mesh_checkbox)
-        
         layout.addStretch()
         
     def get_settings(self) -> dict:
@@ -436,8 +426,7 @@ class OutputPanel(QGroupBox):
             "layer_height_mm": self.layer_spin.value(),
             "layers": int(self.layers_spin.value()),
             "base_thickness_mm": self.base_spin.value(),
-            "invert_z": True, # Default to Face Down
-            "greedy_mesh": self.greedy_mesh_checkbox.isChecked()
+            "invert_z": True # Default to Face Down
         }
 
 
@@ -501,8 +490,7 @@ class ExportThread(QThread):
                 layer_height_mm=self.output_settings['layer_height_mm'],
                 rgb_image=rgb_image,
                 base_thickness_mm=self.output_settings.get('base_thickness_mm', 0.0),
-                invert_z=self.output_settings.get('invert_z', False),
-                greedy_mesh=self.output_settings.get('greedy_mesh', True)
+                invert_z=self.output_settings.get('invert_z', False)
             )
             self.finished_signal.emit()
         except Exception as e:

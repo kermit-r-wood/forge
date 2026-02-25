@@ -178,9 +178,6 @@ class Analyzer:
                                                  min_area=settings.get('min_area', 4),
                                                  kernel_size=settings.get('kernel_size', 1))
                 self.processed = self.palette[self.indices]
-        
-        # Apply greedy mesh preview to match the exported 3MF
-        self.apply_greedy_mesh_preview()
 
     def _clean_indices(self, indices: np.ndarray, min_area: int = 0, kernel_size: int = 1) -> np.ndarray:
         """
@@ -189,6 +186,9 @@ class Analyzer:
         """
         if indices is None:
             return None
+            
+        if min_area <= 1 and kernel_size <= 1:
+            return indices
             
         h, w = indices.shape
         
@@ -243,7 +243,7 @@ class Analyzer:
 
     def _match_colors_lab(self, image: np.ndarray, palette: np.ndarray, h: int, w: int) -> np.ndarray:
         """使用 CIEDE2000 色彩距离进行颜色匹配"""
-        from .color_distance import ciede2000_distance
+        from .color_distance import match_colors_ciede2000_numba
         
         # 将 palette 转换为 LAB
         palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
@@ -253,27 +253,8 @@ class Analyzer:
         image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
         flat_lab = image_lab.reshape(-1, 3)
         
-        # 使用 CIEDE2000 距离匹配
-        # 对每个像素计算与所有 palette 颜色的距离，选择最近的
-        n_pixels = flat_lab.shape[0]
-        n_palette = palette_lab.shape[0]
-        
-        # 分批处理以避免内存问题
-        batch_size = 10000
-        indices = np.zeros(n_pixels, dtype=np.int32)
-        
-        for start in range(0, n_pixels, batch_size):
-            end = min(start + batch_size, n_pixels)
-            batch = flat_lab[start:end]
-            
-            # 计算此批次与所有 palette 颜色的距离
-            # batch: (B, 3), palette_lab: (P, 3) -> distances: (B, P)
-            distances = np.zeros((end - start, n_palette), dtype=np.float32)
-            for i, pixel_lab in enumerate(batch):
-                pixel_expanded = np.tile(pixel_lab, (n_palette, 1))
-                distances[i] = ciede2000_distance(pixel_expanded, palette_lab)
-            
-            indices[start:end] = np.argmin(distances, axis=1)
+        # 使用 Numba 优化的精确 CIEDE2000 距离多核匹配
+        indices = match_colors_ciede2000_numba(flat_lab, palette_lab)
         
         return indices.reshape(h, w)
 
@@ -302,59 +283,3 @@ class Analyzer:
         layer_data = combo_lut[self.indices]
         return layer_data
 
-    def apply_greedy_mesh_preview(self):
-        """
-        应用贪婪网格合并效果到预览图像。
-        
-        This makes the preview match the exported 3MF by filling merged
-        rectangles with the center pixel's color.
-        """
-        if self.processed is None or self.indices is None:
-            return
-        
-        H, W = self.indices.shape
-        result = self.processed.copy()
-        processed_mask = np.zeros((H, W), dtype=bool)
-        
-        # For each unique palette index, apply greedy meshing
-        unique_indices = np.unique(self.indices)
-        
-        for idx in unique_indices:
-            mask = (self.indices == idx)
-            
-            # Apply greedy meshing to this index's pixels
-            for y in range(H):
-                for x in range(W):
-                    if not mask[y, x] or processed_mask[y, x]:
-                        continue
-                    
-                    # Expand right
-                    w = 1
-                    while x + w < W and mask[y, x + w] and not processed_mask[y, x + w]:
-                        w += 1
-                    
-                    # Expand down
-                    h = 1
-                    while y + h < H:
-                        can_extend = True
-                        for dx in range(w):
-                            if not mask[y + h, x + dx] or processed_mask[y + h, x + dx]:
-                                can_extend = False
-                                break
-                        if can_extend:
-                            h += 1
-                        else:
-                            break
-                    
-                    # Get center pixel color
-                    center_y = y + h // 2
-                    center_x = x + w // 2
-                    center_color = self.processed[center_y, center_x]
-                    
-                    # Fill the entire rectangle with center color
-                    for dy in range(h):
-                        for dx in range(w):
-                            result[y + dy, x + dx] = center_color
-                            processed_mask[y + dy, x + dx] = True
-        
-        self.processed = result
