@@ -6,12 +6,12 @@ Direct Binary Search (DBS) 抖动实现 (Numba 部分加速) - LAB 色彩空间
 import numpy as np
 from numba import jit
 import cv2
-from .base import BaseDither, _find_closest_color_lab, precompute_palette_lab
+from .base import BaseDither, _find_closest_color_lab, _rgb_to_lab_fast, precompute_palette_lab
 
 
 @jit(nopython=True, cache=True)
-def _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w):
-    """计算局部加权误差 (使用 HVS 滤波器)"""
+def _compute_local_error(out_lab, target_lab, filter_kernel, y, x, h, w):
+    """计算局部加权误差 (使用 HVS 滤波器) - LAB 色彩空间"""
     kh, kw = filter_kernel.shape
     half_kh = kh // 2
     half_kw = kw // 2
@@ -27,14 +27,14 @@ def _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w):
                 weight = filter_kernel[ky + half_kh, kx + half_kw]
                 
                 for c in range(3):
-                    diff = float(out_img[ny, nx, c]) - float(target_img[ny, nx, c])
+                    diff = out_lab[ny, nx, c] - target_lab[ny, nx, c]
                     error += weight * diff * diff
                     
     return error
 
 
 @jit(nopython=True, cache=True)
-def _initialize_output_lab(target_img, palette_rgb, palette_lab, out_img, indices):
+def _initialize_output_lab(target_img, palette_rgb, palette_lab, out_img, out_lab, indices):
     """初始化输出图像 - 使用 LAB 色彩匹配"""
     h, w = target_img.shape[:2]
     
@@ -49,13 +49,17 @@ def _initialize_output_lab(target_img, palette_rgb, palette_lab, out_img, indice
             out_img[y, x, 0] = int(palette_rgb[idx, 0])
             out_img[y, x, 1] = int(palette_rgb[idx, 1])
             out_img[y, x, 2] = int(palette_rgb[idx, 2])
+            # 同时初始化 LAB 输出
+            out_lab[y, x, 0] = palette_lab[idx, 0]
+            out_lab[y, x, 1] = palette_lab[idx, 1]
+            out_lab[y, x, 2] = palette_lab[idx, 2]
 
 
 @jit(nopython=True, cache=True)
-def _try_swap(out_img, target_img, indices, palette_rgb, filter_kernel, y, x, h, w, n_colors):
-    """尝试交换当前像素的颜色，如果能降低误差则接受"""
+def _try_swap(out_img, out_lab, target_lab, indices, palette_rgb, palette_lab, filter_kernel, y, x, h, w, n_colors):
+    """尝试交换当前像素的颜色，如果能降低 LAB 误差则接受"""
     current_idx = indices[y, x]
-    current_error = _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w)
+    current_error = _compute_local_error(out_lab, target_lab, filter_kernel, y, x, h, w)
     
     best_idx = current_idx
     best_error = current_error
@@ -65,45 +69,48 @@ def _try_swap(out_img, target_img, indices, palette_rgb, filter_kernel, y, x, h,
         if new_idx == current_idx:
             continue
             
-        # 临时替换
-        old_r = out_img[y, x, 0]
-        old_g = out_img[y, x, 1]
-        old_b = out_img[y, x, 2]
+        # 临时替换 LAB 值
+        old_L = out_lab[y, x, 0]
+        old_a = out_lab[y, x, 1]
+        old_b = out_lab[y, x, 2]
         
-        out_img[y, x, 0] = int(palette_rgb[new_idx, 0])
-        out_img[y, x, 1] = int(palette_rgb[new_idx, 1])
-        out_img[y, x, 2] = int(palette_rgb[new_idx, 2])
+        out_lab[y, x, 0] = palette_lab[new_idx, 0]
+        out_lab[y, x, 1] = palette_lab[new_idx, 1]
+        out_lab[y, x, 2] = palette_lab[new_idx, 2]
         
-        new_error = _compute_local_error(out_img, target_img, filter_kernel, y, x, h, w)
+        new_error = _compute_local_error(out_lab, target_lab, filter_kernel, y, x, h, w)
         
         if new_error < best_error:
             best_error = new_error
             best_idx = new_idx
             
-        # 恢复
-        out_img[y, x, 0] = old_r
-        out_img[y, x, 1] = old_g
-        out_img[y, x, 2] = old_b
+        # 恢复 LAB 值
+        out_lab[y, x, 0] = old_L
+        out_lab[y, x, 1] = old_a
+        out_lab[y, x, 2] = old_b
     
-    # 如果找到更好的，应用它
+    # 如果找到更好的，应用它 (同时更新 RGB 和 LAB)
     if best_idx != current_idx:
         indices[y, x] = best_idx
         out_img[y, x, 0] = int(palette_rgb[best_idx, 0])
         out_img[y, x, 1] = int(palette_rgb[best_idx, 1])
         out_img[y, x, 2] = int(palette_rgb[best_idx, 2])
+        out_lab[y, x, 0] = palette_lab[best_idx, 0]
+        out_lab[y, x, 1] = palette_lab[best_idx, 1]
+        out_lab[y, x, 2] = palette_lab[best_idx, 2]
         return True
         
     return False
 
 
 @jit(nopython=True, cache=True)
-def _dbs_iteration(out_img, target_img, indices, palette_rgb, filter_kernel, h, w, n_colors):
+def _dbs_iteration(out_img, out_lab, target_lab, indices, palette_rgb, palette_lab, filter_kernel, h, w, n_colors):
     """执行一轮 DBS 迭代"""
     changes = 0
     
     for y in range(h):
         for x in range(w):
-            if _try_swap(out_img, target_img, indices, palette_rgb, filter_kernel, y, x, h, w, n_colors):
+            if _try_swap(out_img, out_lab, target_lab, indices, palette_rgb, palette_lab, filter_kernel, y, x, h, w, n_colors):
                 changes += 1
                 
     return changes
@@ -151,18 +158,25 @@ class DBSDither(BaseDither):
         # 预计算 palette 的 LAB 值
         palette_lab = precompute_palette_lab(palette_float)
         
+        # 将目标图像转换为 LAB (使用 cv2 精确转换)
+        target_rgb_f32 = image.astype(np.float32) / 255.0
+        target_lab = cv2.cvtColor(target_rgb_f32, cv2.COLOR_RGB2LAB).astype(np.float64)
+        
+        # 创建 LAB 输出图像
+        out_lab = np.zeros((h, w, 3), dtype=np.float64)
+        
         # 创建 HVS 滤波器
         if self._filter_kernel is None:
             self._filter_kernel = self._create_hvs_filter(5)
         filter_kernel = self._filter_kernel
         
-        # 初始化 (使用 LAB 最近邻)
-        _initialize_output_lab(target_img, palette_float, palette_lab, out_img, indices)
+        # 初始化 (使用 LAB 最近邻, 同时填充 out_lab)
+        _initialize_output_lab(target_img, palette_float, palette_lab, out_img, out_lab, indices)
         
-        # 迭代优化
+        # 迭代优化 (在 LAB 空间计算误差)
         for iteration in range(self.max_iterations):
             changes = _dbs_iteration(
-                out_img, target_img, indices, palette_float, 
+                out_img, out_lab, target_lab, indices, palette_float, palette_lab,
                 filter_kernel, h, w, n_colors
             )
             

@@ -4,7 +4,7 @@ Contains logic for generating calibration cards and solving material parameters.
 """
 import numpy as np
 import cv2
-from scipy.optimize import minimize
+from scipy.optimize import differential_evolution
 from .color_model import ColorModel
 from .exporter import Exporter
 from .optics import calculate_reflected_color, set_optical_params
@@ -113,10 +113,11 @@ class CalibrationSolver:
     """Solves for material parameters."""
     
     @staticmethod
-    def solve(current_materials: list[dict], observations: list[tuple]) -> list[dict]:
+    def solve(current_materials: list[dict], observations: list[tuple], optical_params: dict = None) -> list[dict]:
         """
         observations: list of (patch_index, (r, g, b))
         patch_index corresponds to the flat index in get_16_color_patches()
+        optical_params: dict with optimized optical params from OpticsCalibrationSolver
         """
         patch_defs = CalibrationGenerator.get_16_color_patches()
         
@@ -168,6 +169,12 @@ class CalibrationSolver:
                     'thickness': 0.08
                 })
                 
+            # White color for fill and base layers
+            white_color = temp_materials[0]['color']
+            if isinstance(white_color, str):
+                white_color = hex_to_rgb(white_color)
+            white_opacity = temp_materials[0]['opacity']
+                
             for counts, measured_rgb in valid_obs:
                 c, m, y = counts
                 layers_optics = []
@@ -183,13 +190,26 @@ class CalibrationSolver:
                 rem = 5 - (c+m+y)
                 if rem > 0:
                     for _ in range(rem):
-                        layers_optics.append({'color': hex_to_rgb(temp_materials[0]['color']), 'opacity': temp_materials[0]['opacity'], 'thickness': 0.08})
+                        layers_optics.append({'color': white_color, 'opacity': white_opacity, 'thickness': 0.08})
+                
+                # Add base plate layers (0.4mm / 0.08mm = 5 layers of white)
+                base_layers = int(round(0.4 / 0.08))
+                for _ in range(base_layers):
+                    layers_optics.append({'color': white_color, 'opacity': white_opacity, 'thickness': 0.08})
                         
-                simulated_rgb = calculate_reflected_color(layers_optics)
+                # Pass optical params explicitly if provided
+                opt_kwargs = {}
+                if optical_params:
+                    opt_kwargs['absorption_factor'] = optical_params.get('absorption_factor')
+                    opt_kwargs['scatter_contribution'] = optical_params.get('scatter_contribution')
+                    opt_kwargs['scatter_blend'] = optical_params.get('scatter_blend')
+                    opt_kwargs['absorption_gamma'] = optical_params.get('absorption_gamma')
+                
+                simulated_rgb = calculate_reflected_color(layers_optics, **opt_kwargs)
                 
                 # Convert to LAB for CIEDE2000 comparison
-                sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.uint8)
-                meas_rgb_arr = np.array([[measured_rgb]], dtype=np.uint8)
+                sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.float32) / 255.0
+                meas_rgb_arr = np.array([[measured_rgb]], dtype=np.float32) / 255.0
                 
                 sim_lab = cv2.cvtColor(sim_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
                 meas_lab = cv2.cvtColor(meas_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
@@ -213,7 +233,14 @@ class CalibrationSolver:
         for _ in range(3):
             bounds.extend([(0, 255), (0, 255), (0, 255), (0.01, 1.0)])
             
-        result = minimize(loss_function, x0, bounds=bounds, method='L-BFGS-B')
+        result = differential_evolution(
+            loss_function, bounds,
+            seed=42,
+            maxiter=300,
+            tol=1e-6,
+            polish=True,
+            x0=x0
+        )
         
         # Apply results
         optimized = []
@@ -338,8 +365,8 @@ class OpticsCalibrationSolver:
                 )
                 
                 # Convert to LAB for CIEDE2000
-                sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.uint8)
-                meas_rgb_arr = np.array([[measured_rgb]], dtype=np.uint8)
+                sim_rgb_arr = np.array([[simulated_rgb]], dtype=np.float32) / 255.0
+                meas_rgb_arr = np.array([[measured_rgb]], dtype=np.float32) / 255.0
                 
                 sim_lab = cv2.cvtColor(sim_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
                 meas_lab = cv2.cvtColor(meas_rgb_arr, cv2.COLOR_RGB2LAB).astype(np.float32).reshape(3)
@@ -359,8 +386,7 @@ class OpticsCalibrationSolver:
             
             return total_error + reg
         
-        # Optimize using global optimizer (differential_evolution)
-        from scipy.optimize import differential_evolution
+
         
         bounds = [
             (0.5, 8.0),    # absorption_factor

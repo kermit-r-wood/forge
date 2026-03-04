@@ -11,6 +11,8 @@ Algorithms:
 - Weighted Euclidean: Allows custom weighting of L, a, b components.
 """
 import numpy as np
+import math
+from numba import jit, prange
 
 def cie76_distance(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     """
@@ -109,5 +111,107 @@ def ciede2000_distance(lab1: np.ndarray, lab2: np.ndarray, kL=1, kC=1, kH=1) -> 
     return np.sqrt(term1 + term2 + term3 + term4)
 
 
+@jit(nopython=True, fastmath=True, cache=True)
+def _ciede2000_scalar(L1, a1, b1, L2, a2, b2):
+    """
+    Calculate CIEDE2000 color difference between two scalar LAB colors.
+    Used for Numba parallel loops.
+    """
+    avg_L = (L1 + L2) / 2.0
+    C1 = math.sqrt(a1**2 + b1**2)
+    C2 = math.sqrt(a2**2 + b2**2)
+    avg_C = (C1 + C2) / 2.0
+    
+    avg_C7 = avg_C**7
+    G = 0.5 * (1.0 - math.sqrt(avg_C7 / (avg_C7 + 6103515625.0))) # 25**7 = 6103515625.0
+    
+    a1_p = (1.0 + G) * a1
+    a2_p = (1.0 + G) * a2
+    
+    C1_p = math.sqrt(a1_p**2 + b1**2)
+    C2_p = math.sqrt(a2_p**2 + b2**2)
+    
+    h1_p = math.atan2(b1, a1_p)
+    h1_p = math.degrees(h1_p) % 360.0
+    
+    h2_p = math.atan2(b2, a2_p)
+    h2_p = math.degrees(h2_p) % 360.0
+    
+    dL_p = L2 - L1
+    dC_p = C2_p - C1_p
+    
+    dh_p = h2_p - h1_p
+    if abs(dh_p) > 180.0:
+        if dh_p > 0.0:
+            dh_p -= 360.0
+        else:
+            dh_p += 360.0
+            
+    dH_p = 2.0 * math.sqrt(C1_p * C2_p) * math.sin(math.radians(dh_p) / 2.0)
+    
+    avg_L_p = (L1 + L2) / 2.0
+    avg_C_p = (C1_p + C2_p) / 2.0
+    
+    sum_h_p = h1_p + h2_p
+    abs_diff_h = abs(h1_p - h2_p)
+    if abs_diff_h > 180.0:
+        if sum_h_p < 360.0:
+            avg_h_p = (sum_h_p + 360.0) / 2.0
+        else:
+            avg_h_p = (sum_h_p - 360.0) / 2.0
+    else:
+        avg_h_p = sum_h_p / 2.0
+        
+    T = 1.0 - 0.17 * math.cos(math.radians(avg_h_p - 30.0)) + \
+        0.24 * math.cos(math.radians(2.0 * avg_h_p)) + \
+        0.32 * math.cos(math.radians(3.0 * avg_h_p + 6.0)) - \
+        0.20 * math.cos(math.radians(4.0 * avg_h_p - 63.0))
+        
+    delta_theta = 30.0 * math.exp(-((avg_h_p - 275.0) / 25.0)**2)
+    avg_C_p7 = avg_C_p**7
+    RC = 2.0 * math.sqrt(avg_C_p7 / (avg_C_p7 + 6103515625.0))
+    RT = -math.sin(math.radians(2.0 * delta_theta)) * RC
+    
+    SL = 1.0 + (0.015 * (avg_L_p - 50.0)**2) / math.sqrt(20.0 + (avg_L_p - 50.0)**2)
+    SC = 1.0 + 0.045 * avg_C_p
+    SH = 1.0 + 0.015 * avg_C_p * T
+    
+    term1 = (dL_p / SL)**2
+    term2 = (dC_p / SC)**2
+    term3 = (dH_p / SH)**2
+    term4 = RT * (dC_p / SC) * (dH_p / SH)
+    
+    return math.sqrt(term1 + term2 + term3 + term4)
 
+
+@jit(nopython=True, fastmath=True, parallel=True, cache=True)
+def match_colors_ciede2000_numba(image_lab_flat, palette_lab):
+    """
+    Fast, parallel matching of colors using Numba-accelerated CIEDE2000 metric.
+    """
+    n_pixels = image_lab_flat.shape[0]
+    n_palette = palette_lab.shape[0]
+    indices = np.zeros(n_pixels, dtype=np.int32)
+    
+    for i in prange(n_pixels):
+        best_dist = 1e10
+        best_idx = 0
+        
+        L1 = image_lab_flat[i, 0]
+        a1 = image_lab_flat[i, 1]
+        b1 = image_lab_flat[i, 2]
+        
+        for j in range(n_palette):
+            L2 = palette_lab[j, 0]
+            a2 = palette_lab[j, 1]
+            b2 = palette_lab[j, 2]
+            
+            dist = _ciede2000_scalar(L1, a1, b1, L2, a2, b2)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = j
+                
+        indices[i] = best_idx
+        
+    return indices
 

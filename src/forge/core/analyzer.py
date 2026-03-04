@@ -132,13 +132,20 @@ class Analyzer:
         vectorize_idx = settings.get('vectorize', 0)
         vectorizer = self.vectorizers.get(vectorize_idx)
         
-        if vectorizer:
-            # 使用矢量化处理 (跳过量化和抖动)
+        # VTracer (index 2) 作为边缘平滑后处理，需要先抖动
+        # ColorTraced (index 1) 仍作为独立矢量化器使用
+        use_vtracer_smoothing = (vectorize_idx == 2 and vectorizer 
+                                 and hasattr(vectorizer, 'smooth_edges')
+                                 and vectorizer.is_available)
+        use_standalone_vectorizer = (vectorizer and not use_vtracer_smoothing)
+        
+        if use_standalone_vectorizer:
+            # ColorTraced 等独立矢量化器，跳过量化和抖动
             processed_rgb, indices = vectorizer.apply(current_img, palette)
             self.processed = processed_rgb
             self.indices = indices
         else:
-            # 传统处理流程: 量化 + 抖动
+            # 标准处理流程: 量化 + 抖动（+ 可选 VTracer 边缘平滑）
             
             # 4a. 色彩量化 (Reduction) - 可选
             quant_idx = settings.get('quantize', 0)
@@ -155,7 +162,6 @@ class Analyzer:
                 dithered_rgb = dither_algo.apply(current_img, palette)
                 
                 # 生成 Index Map (用于 3MF 生成)
-                # 使用 CIE76 (LAB 欧几里得距离) 匹配
                 indices = self._match_colors_lab(dithered_rgb, palette, target_h, target_w)
                 
                 # Post-process: Clean up indices to avoid printer issues
@@ -163,20 +169,23 @@ class Analyzer:
                                                  min_area=settings.get('min_area', 4),
                                                  kernel_size=settings.get('kernel_size', 1))
                 
-                # 预览使用 palette 颜色（材料组合颜色），而非抖动 RGB
-                # 这确保预览与实际打印效果一致
-                self.processed = self.palette[self.indices]
-                
             else:
                 # 无抖动，直接匹配
                 indices = self._match_colors_lab(current_img, palette, target_h, target_w)
-
-                    
-                # Post-process: Clean up indices to avoid slicer warnings
-                # (Removing single pixels and thin lines)
+                
+                # Post-process: Clean up indices
                 self.indices = self._clean_indices(indices,
                                                  min_area=settings.get('min_area', 4),
                                                  kernel_size=settings.get('kernel_size', 1))
+            
+            # 4c. VTracer 边缘平滑后处理（保留抖动渐变，平滑区域边界）
+            if use_vtracer_smoothing:
+                smoothed_rgb, smoothed_indices = vectorizer.smooth_edges(
+                    img_resized, self.indices, palette)
+                self.processed = smoothed_rgb
+                self.indices = smoothed_indices
+            else:
+                # 预览使用 palette 颜色
                 self.processed = self.palette[self.indices]
 
     def _clean_indices(self, indices: np.ndarray, min_area: int = 0, kernel_size: int = 1) -> np.ndarray:
@@ -245,12 +254,13 @@ class Analyzer:
         """使用 CIEDE2000 色彩距离进行颜色匹配"""
         from .color_distance import match_colors_ciede2000_numba
         
-        # 将 palette 转换为 LAB
-        palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
+        # Convert RGB to float32 [0, 1] before LAB conversion to get standard LAB ranges
+        palette_rgb = palette.reshape(1, -1, 3).astype(np.float32) / 255.0
         palette_lab = cv2.cvtColor(palette_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
         
         # 将图像转换为 LAB
-        image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+        image_rgb = image.astype(np.float32) / 255.0
+        image_lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
         flat_lab = image_lab.reshape(-1, 3)
         
         # 使用 Numba 优化的精确 CIEDE2000 距离多核匹配

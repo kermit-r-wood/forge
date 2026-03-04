@@ -1,7 +1,7 @@
 """
 VTracer 矢量化包装器
-可选依赖，不可用时自动回退到 Color-Traced
-SVG 渲染使用 Qt QSvgRenderer，确保正确处理所有 SVG 特性
+可作为独立矢量化器使用，也可作为抖动结果的边缘平滑器。
+SVG 渲染使用 Qt QSvgRenderer，确保正确处理所有 SVG 特性。
 """
 import io
 import numpy as np
@@ -19,49 +19,36 @@ except ImportError:
 def _render_svg_to_numpy(svg_str: str, width: int, height: int) -> np.ndarray:
     """
     使用 Qt QSvgRenderer 将 SVG 字符串渲染为 RGB numpy 数组。
-    Qt 正确处理所有 SVG 特性（transform, viewBox, 坐标系等）。
-    渲染时关闭抗锯齿并使用 2x 超采样，避免边缘向白色混合导致过曝。
+    关闭抗锯齿，避免边缘向白色背景混合。
     """
     from PySide6.QtSvg import QSvgRenderer
     from PySide6.QtGui import QImage, QPainter
     from PySide6.QtCore import QByteArray, Qt
 
-    # 2x 超采样渲染，减少多边形间微间隙
-    RENDER_SCALE = 2
-    render_w = width * RENDER_SCALE
-    render_h = height * RENDER_SCALE
-
     svg_data = QByteArray(svg_str.encode('utf-8'))
     renderer = QSvgRenderer(svg_data)
 
-    # 创建 QImage 作为渲染目标
-    image = QImage(render_w, render_h, QImage.Format.Format_RGB32)
+    image = QImage(width, height, QImage.Format.Format_RGB32)
     image.fill(Qt.GlobalColor.white)
 
     painter = QPainter(image)
-    # 关闭抗锯齿，防止多边形边缘向白色背景混合（过曝的根因）
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
     renderer.render(painter)
     painter.end()
 
-    # QImage -> numpy array
     ptr = image.bits()
-    arr = np.frombuffer(ptr, dtype=np.uint8).reshape(render_h, render_w, 4)
-    # QImage Format_RGB32 是 BGRA 格式，提取 RGB
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape(height, width, 4)
     rgb = arr[:, :, [2, 1, 0]].copy()
-    # 最近邻缩回原始分辨率，保持锐利边缘
-    if RENDER_SCALE != 1:
-        rgb = cv2.resize(rgb, (width, height), interpolation=cv2.INTER_NEAREST)
     return rgb
 
 
 class VTracerVectorizer(BaseVectorizer):
     """
     VTracer 矢量化包装器
-    使用 Rust 编写的高性能矢量化库
-    不可用时自动回退到 Color-Traced
-    SVG 渲染使用 Qt QSvgRenderer
+    支持两种模式:
+    1. 独立矢量化 (apply) - 直接矢量化图像
+    2. 边缘平滑 (smooth_edges) - 在抖动结果上平滑边缘
     """
 
     def __init__(self):
@@ -72,28 +59,18 @@ class VTracerVectorizer(BaseVectorizer):
         return HAS_VTRACER
 
     def apply(self, image: np.ndarray, palette: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """执行 VTracer 矢量化"""
+        """独立矢量化模式（向后兼容）"""
         if not HAS_VTRACER:
             return self._fallback.apply(image, palette)
 
         h, w = image.shape[:2]
-
-        # 1. 直接映射到调色板（确保输入到 vtracer 的颜色严格来自 palette）
-        # 不做 K-Means 预量化，避免丢失 palette 中的颜色区分
-        indices = self._map_to_palette(image, palette)
-        mapped = palette[indices]
-
-        # 3. vtracer 矢量化
-        # 先将 palette 映射图放大 3x（最近邻），使 1px 细线变为 3px，
-        # 避免 vtracer 追踪时丢弃过细的特征。SVG 是矢量格式，渲染回原始分辨率不受影响。
         UPSCALE = 3
-        mapped_up = cv2.resize(mapped, (w * UPSCALE, h * UPSCALE),
-                               interpolation=cv2.INTER_NEAREST)
+        image_up = cv2.resize(image, (w * UPSCALE, h * UPSCALE),
+                              interpolation=cv2.INTER_NEAREST)
         try:
-            svg_str = self._vectorize(mapped_up)
-            # 4. 用 Qt 渲染 SVG 回原始分辨率光栅图
-            result = _render_svg_to_numpy(svg_str, w, h)
-            # 5. 映射回 palette 索引
+            svg_str = self._vectorize(image_up)
+            result_up = _render_svg_to_numpy(svg_str, w * UPSCALE, h * UPSCALE)
+            result = cv2.resize(result_up, (w, h), interpolation=cv2.INTER_NEAREST)
             indices = self._map_to_palette(result, palette)
             result = palette[indices]
         except Exception as e:
@@ -102,7 +79,58 @@ class VTracerVectorizer(BaseVectorizer):
 
         return result, indices
 
+    def smooth_edges(self, image: np.ndarray, dithered_indices: np.ndarray,
+                     palette: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        边缘平滑模式：在抖动结果上用 VTracer 平滑颜色区域边界。
+        内部保留抖动的像素图案（渐变细节），边缘使用 VTracer 的平滑多边形。
 
+        关键：从 VTracer 的平滑区域检测边缘（真实颜色边界），
+        而不是从抖动结果检测（抖动的每个交替像素都是"边界"）。
+
+        Args:
+            image: 原始图像 (H, W, 3) RGB
+            dithered_indices: 抖动后的调色板索引图 (H, W)
+            palette: 调色板 (N, 3) RGB
+
+        Returns:
+            tuple: (smoothed_rgb, smoothed_indices)
+        """
+        if not HAS_VTRACER:
+            return palette[dithered_indices], dithered_indices
+
+        h, w = image.shape[:2]
+        UPSCALE = 3
+
+        # 1. VTracer 矢量化原始图像，获取平滑的颜色区域
+        image_up = cv2.resize(image, (w * UPSCALE, h * UPSCALE),
+                              interpolation=cv2.INTER_NEAREST)
+        try:
+            svg_str = self._vectorize(image_up)
+            result_up = _render_svg_to_numpy(svg_str, w * UPSCALE, h * UPSCALE)
+            vt_result = cv2.resize(result_up, (w, h), interpolation=cv2.INTER_NEAREST)
+            vt_indices = self._map_to_palette(vt_result, palette)
+        except Exception as e:
+            print(f"[VTracer] 边缘平滑失败: {e}")
+            return palette[dithered_indices], dithered_indices
+
+        # 2. 从 VTracer 的平滑区域检测边缘（真实颜色边界）
+        #    VTracer 产生大块平滑多边形，边缘即真实颜色过渡处
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        edge_mask = np.zeros((h, w), dtype=bool)
+
+        for idx in np.unique(vt_indices):
+            mask = (vt_indices == idx).astype(np.uint8)
+            dilated = cv2.dilate(mask, kernel, iterations=1)
+            eroded = cv2.erode(mask, kernel, iterations=1)
+            edge_mask |= ((dilated - eroded) > 0)
+
+        # 3. 合并：边缘用 VTracer（平滑边界），内部保留抖动（渐变细节）
+        smoothed_indices = dithered_indices.copy()
+        smoothed_indices[edge_mask] = vt_indices[edge_mask]
+
+        smoothed_rgb = palette[smoothed_indices]
+        return smoothed_rgb, smoothed_indices
 
     def _map_to_palette(self, image: np.ndarray, palette: np.ndarray) -> np.ndarray:
         h, w = image.shape[:2]

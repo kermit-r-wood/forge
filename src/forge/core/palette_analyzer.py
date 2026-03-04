@@ -21,7 +21,7 @@ class PaletteAnalyzer:
         self.palette = palette
         
         # 转换到 LAB 空间
-        palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
+        palette_rgb = palette.reshape(1, -1, 3).astype(np.float32) / 255.0
         self.palette_lab = cv2.cvtColor(palette_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
         
         # 构建 KDTree
@@ -41,7 +41,8 @@ class PaletteAnalyzer:
                 - stats: 统计信息字典
         """
         # 转换到 LAB
-        image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+        image_rgb = image.astype(np.float32) / 255.0
+        image_lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
         h, w = image.shape[:2]
         
         # 计算每个像素到最近调色板颜色的距离
@@ -106,7 +107,8 @@ class PaletteAnalyzer:
         Returns:
             list of dict: 每个 dict 包含 'color' (RGB), 'distance', 'count'
         """
-        image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+        image_rgb = image.astype(np.float32) / 255.0
+        image_lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
         flat_lab = image_lab.reshape(-1, 3)
         flat_rgb = image.reshape(-1, 3)
         

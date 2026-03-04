@@ -53,18 +53,20 @@ class ColorTracedVectorizer(BaseVectorizer):
     def _map_to_palette(self, image: np.ndarray, palette: np.ndarray) -> np.ndarray:
         """将图像颜色映射到调色板，返回索引图"""
         h, w = image.shape[:2]
-        pixels = image.reshape(-1, 3).astype(np.float32)
-        palette_f = palette.astype(np.float32)
         
-        # 分批处理避免内存溢出
-        batch_size = 50000
-        indices = np.zeros(len(pixels), dtype=np.int32)
+        from ..color_distance import match_colors_ciede2000_numba
         
-        for i in range(0, len(pixels), batch_size):
-            batch = pixels[i:i+batch_size]
-            diff = batch[:, np.newaxis, :] - palette_f[np.newaxis, :, :]
-            dist = np.sum(diff ** 2, axis=2)
-            indices[i:i+batch_size] = np.argmin(dist, axis=1)
+        # Convert RGB to float32 [0, 1] before LAB conversion to get standard LAB ranges
+        palette_rgb = palette.reshape(1, -1, 3).astype(np.float32) / 255.0
+        palette_lab = cv2.cvtColor(palette_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+        
+        # 将图像转换为 LAB
+        image_rgb = image.astype(np.float32) / 255.0
+        image_lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        flat_lab = image_lab.reshape(-1, 3)
+        
+        # 使用 Numba 优化的精确 CIEDE2000 距离多核匹配
+        indices = match_colors_ciede2000_numba(flat_lab, palette_lab)
         
         return indices.reshape(h, w)
     

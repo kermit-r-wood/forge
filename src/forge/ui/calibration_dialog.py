@@ -324,7 +324,7 @@ class CalibrationDialog(QDialog):
             self.optimized_optics = optics_params
             
             # Step 2: Optimize material parameters (with new optics applied)
-            optimized = CalibrationSolver.solve(self.current_materials, obs_list)
+            optimized = CalibrationSolver.solve(self.current_materials, obs_list, optical_params=optics_params)
             self.optimized_materials = optimized
             
             # Show results

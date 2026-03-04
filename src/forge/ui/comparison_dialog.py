@@ -232,23 +232,27 @@ class ComparisonWorker(QThread):
         
         completed = 0
         
-        # 顺序执行以确保稳定性 (避免多线程下的C++扩展冲突)
-        for combo in to_process:
-            if self._check_cancelled():
-                break
-                
-            try:
-                # 直接调用 _process_single
-                result = self._process_single(combo)
-                
-                if result is not None:
-                    self.result_ready.emit(combo["label"], result)
-                    
-            except Exception as e:
-                print(f"Error processing {combo}: {e}")
+        # 使用线程池并发执行，加速多算法处理过程
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_combo = {
+                executor.submit(self._process_single, combo): combo 
+                for combo in to_process
+            }
             
-            completed += 1
-            self.progress_bar_signal_hack(completed, total)
+            for future in as_completed(future_to_combo):
+                if self._check_cancelled():
+                    break
+                    
+                combo = future_to_combo[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        self.result_ready.emit(combo["label"], result)
+                except Exception as e:
+                    print(f"Error processing {combo}: {e}")
+                
+                completed += 1
+                self.progress_bar_signal_hack(completed, total)
         
         self.finished_all.emit()
     
@@ -293,23 +297,17 @@ class ComparisonDialog(QDialog):
     """算法比较对话框"""
     
     COMBINATIONS = [
-        # === 量化算法对比 (固定: 无预处理 + Hilbert抖动) ===
-        {"preprocess": 2, "quantize": 0, "dither": 7, "vectorize": 0, "label": "Q:KMeans | D:Hilbert"},
-        {"preprocess": 2, "quantize": 1, "dither": 7, "vectorize": 0, "label": "Q:中值 | D:Hilbert"},
-        {"preprocess": 2, "quantize": 2, "dither": 7, "vectorize": 0, "label": "Q:八叉树 | D:Hilbert"},
-        {"preprocess": 2, "quantize": 3, "dither": 7, "vectorize": 0, "label": "Q:无 | D:Hilbert"},
-        
         # === 抖动算法对比 (固定: 无预处理 + 无量化) ===
         {"preprocess": 2, "quantize": 3, "dither": 0, "vectorize": 0, "label": "Q:无 | D:FS"},
         {"preprocess": 2, "quantize": 3, "dither": 1, "vectorize": 0, "label": "Q:无 | D:Atkinson"},
         {"preprocess": 2, "quantize": 3, "dither": 2, "vectorize": 0, "label": "Q:无 | D:Sierra"},
-        {"preprocess": 2, "quantize": 3, "dither": 3, "vectorize": 0, "label": "Q:无 | D:无"},
         {"preprocess": 2, "quantize": 3, "dither": 4, "vectorize": 0, "label": "Q:无 | D:BlueNoise"},
         {"preprocess": 2, "quantize": 3, "dither": 5, "vectorize": 0, "label": "Q:无 | D:Bayer"},
         {"preprocess": 2, "quantize": 3, "dither": 6, "vectorize": 0, "label": "Q:无 | D:蛇形FS"},
-        # Hilbert 已在量化组中作为基准展示，此处移除以去重
+        {"preprocess": 2, "quantize": 3, "dither": 7, "vectorize": 0, "label": "Q:无 | D:Hilbert"},
         {"preprocess": 2, "quantize": 3, "dither": 8, "vectorize": 0, "label": "Q:无 | D:结构感知"},
         {"preprocess": 2, "quantize": 3, "dither": 9, "vectorize": 0, "label": "Q:无 | D:DBS"},
+        {"preprocess": 2, "quantize": 3, "dither": 3, "vectorize": 0, "label": "Q:无 | D:无"},
     ]
     
     selection_made = Signal(dict)

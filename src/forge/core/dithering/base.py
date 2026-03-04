@@ -158,7 +158,7 @@ class BaseDither(ABC):
         if self._palette_rgb is None or not np.array_equal(self._palette_rgb, palette):
             self._palette_rgb = palette.copy()
             # 转换 palette 到 LAB
-            palette_reshaped = palette.reshape(1, -1, 3).astype(np.uint8)
+            palette_reshaped = palette.reshape(1, -1, 3).astype(np.float32) / 255.0
             self._palette_lab = cv2.cvtColor(palette_reshaped, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
             
             # 构建 KDTree 用于快速粗略查找
@@ -170,7 +170,7 @@ class BaseDither(ABC):
         self._ensure_lab_palette(palette)
         
         # 将单个像素转换为 LAB
-        pixel_rgb = np.clip(pixel, 0, 255).astype(np.uint8).reshape(1, 1, 3)
+        pixel_rgb = (np.clip(pixel, 0, 255).astype(np.float32) / 255.0).reshape(1, 1, 3)
         pixel_lab = cv2.cvtColor(pixel_rgb, cv2.COLOR_RGB2LAB).reshape(3).astype(np.float32)
         
         # 如果是 CIE76 (Euclidean)，直接使用 KDTree
