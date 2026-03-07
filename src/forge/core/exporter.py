@@ -140,6 +140,7 @@ class Exporter:
         v_lines = np.char.add(v_lines, '" g="')
         v_lines = np.char.add(v_lines, s_vg)
         v_lines = np.char.add(v_lines, '" b="')
+        v_lines = np.char.add(v_lines, s_vb)
         v_lines = np.char.add(v_lines, '" />')
         
         return "".join(v_lines)
@@ -229,10 +230,14 @@ class Exporter:
                         continue
                     
                     # Calculate Z position
+                    # Fix: Match physical print layers to optical model assumption
+                    # K-M optics assume combo[0] is closest to the viewer.
                     if invert_z:
-                        pz = (num_layers - 1 - z) * layer_height_mm + color_layer_z_start
-                    else:
+                        # Face Down: Viewer sees Z=0 first -> combo[0] must be at Z=0
                         pz = z * layer_height_mm + color_layer_z_start
+                    else:
+                        # Face Up: Viewer sees highest Z first -> combo[0] must be at highest Z
+                        pz = (num_layers - 1 - z) * layer_height_mm + color_layer_z_start
                     
                     # Scale and translate cube vertices
                     scaled_verts = cube_verts.copy()
