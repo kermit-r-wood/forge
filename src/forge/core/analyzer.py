@@ -179,6 +179,7 @@ class Analyzer:
                                                  kernel_size=settings.get('kernel_size', 1))
             
             # 4c. VTracer 边缘平滑后处理（保留抖动渐变，平滑区域边界）
+            self.dithered_debug = self.indices.copy()
             if use_vtracer_smoothing:
                 smoothed_rgb, smoothed_indices = vectorizer.smooth_edges(
                     img_resized, self.indices, palette)
