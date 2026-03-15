@@ -212,8 +212,7 @@ class AlgorithmPanel(QGroupBox):
         self.vectorize_combo = SafeComboBox()
         self.vectorize_combo.addItems([
             "关闭 (使用抖动)",         # 0
-            "Color-Traced",    # 1
-            "VTracer (可选)"           # 2
+            "VTracer"                 # 1
         ])
         self.vectorize_combo.setToolTip(
             "矢量化模式适用于动漫/插画/Logo 等扁平风格图像\n"

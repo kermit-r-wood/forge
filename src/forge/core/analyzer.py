@@ -22,7 +22,6 @@ from .dithering.riemersma import RiemersmaDither
 from .dithering.structure_aware import StructureAwareDither
 from .dithering.dbs import DBSDither
 from .color_model import ColorModel
-from .vectorizers.color_traced import ColorTracedVectorizer
 from .vectorizers.vtracer_wrapper import VTracerVectorizer
 
 class Analyzer:
@@ -63,8 +62,7 @@ class Analyzer:
         # 矢量化处理器
         self.vectorizers = {
             0: None,                      # 不使用矢量化
-            1: ColorTracedVectorizer(),   # Color-Traced (推荐)
-            2: VTracerVectorizer()        # VTracer (可选)
+            1: VTracerVectorizer()        # VTracer (可选)
         }
         
     def _update_dither_settings(self, metric: str):
@@ -132,15 +130,14 @@ class Analyzer:
         vectorize_idx = settings.get('vectorize', 0)
         vectorizer = self.vectorizers.get(vectorize_idx)
         
-        # VTracer (index 2) 作为边缘平滑后处理，需要先抖动
-        # ColorTraced (index 1) 仍作为独立矢量化器使用
-        use_vtracer_smoothing = (vectorize_idx == 2 and vectorizer 
+        # VTracer (index 1) 作为边缘平滑后处理，需要先抖动
+        use_vtracer_smoothing = (vectorize_idx == 1 and vectorizer 
                                  and hasattr(vectorizer, 'smooth_edges')
                                  and vectorizer.is_available)
         use_standalone_vectorizer = (vectorizer and not use_vtracer_smoothing)
         
         if use_standalone_vectorizer:
-            # ColorTraced 等独立矢量化器，跳过量化和抖动
+            # 独立矢量化器，跳过量化和抖动
             processed_rgb, indices = vectorizer.apply(current_img, palette)
             self.processed = processed_rgb
             self.indices = indices

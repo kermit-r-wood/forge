@@ -3,8 +3,7 @@
 实现并比较 4 种矢量化方法:
 1. Potrace - 专业位图追踪
 2. VTracer - 现代彩色矢量化
-3. Color-Traced - 分颜色层 Potrace
-4. Bezier Fitting - 贝塞尔曲线拟合
+3. Bezier Fitting - 贝塞尔曲线拟合
 
 使用方法:
     uv run python scripts/test_vectorization_advanced.py <image_path>
@@ -64,17 +63,19 @@ def quantize_image(image: np.ndarray, n_colors: int = 16) -> tuple[np.ndarray, n
 def map_to_palette(image: np.ndarray, palette: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """将图像颜色映射到调色板, 返回 (索引图, 结果图)"""
     h, w = image.shape[:2]
-    pixels = image.reshape(-1, 3).astype(np.float32)
-    palette_f = palette.astype(np.float32)
     
-    batch_size = 10000
-    indices = np.zeros(len(pixels), dtype=np.int32)
+    from forge.core.color_distance import match_colors_ciede2000_numba
     
-    for i in range(0, len(pixels), batch_size):
-        batch = pixels[i:i+batch_size]
-        diff = batch[:, np.newaxis, :] - palette_f[np.newaxis, :, :]
-        dist = np.sum(diff ** 2, axis=2)
-        indices[i:i+batch_size] = np.argmin(dist, axis=1)
+    # 将 palette 转换为 LAB
+    palette_rgb = palette.reshape(1, -1, 3).astype(np.uint8)
+    palette_lab = cv2.cvtColor(palette_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+    
+    # 将图像转换为 LAB
+    image_lab = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    flat_lab = image_lab.reshape(-1, 3)
+    
+    # 使用 Numba 优化的精确 CIEDE2000 距离多核匹配
+    indices = match_colors_ciede2000_numba(flat_lab, palette_lab)
     
     indices = indices.reshape(h, w)
     result = palette[indices]
@@ -254,121 +255,7 @@ def method_vtracer(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
 
 
 # ============================================================
-# Method 3: Color-Traced (Per-color Potrace)
-# ============================================================
-def method_color_traced(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
-    """分颜色层处理: 每种颜色独立量化 + Potrace 追踪"""
-    if not HAS_POTRACE:
-        print("  [SKIP] Potrace not available, using fallback")
-        return method_color_traced_fallback(image, palette)
-    
-    h, w = image.shape[:2]
-    
-    # 量化到较少颜色
-    quantized, centers = quantize_image(image, n_colors=12)
-    
-    # 为每个量化颜色找到最近的 palette 颜色
-    center_to_palette = {}
-    for i, center in enumerate(centers):
-        diff = palette.astype(np.float32) - center.astype(np.float32)
-        dist = np.sum(diff ** 2, axis=1)
-        center_to_palette[i] = int(np.argmin(dist))
-    
-    # 获取每个像素的量化标签
-    pixels = quantized.reshape(-1, 3)
-    labels = np.zeros(len(pixels), dtype=np.int32)
-    for i, center in enumerate(centers):
-        mask = np.all(pixels == center, axis=1)
-        labels[mask] = i
-    labels = labels.reshape(h, w)
-    
-    # 收集区域并按面积排序
-    regions = []
-    for label_idx in range(len(centers)):
-        mask = (labels == label_idx).astype(np.uint8) * 255
-        area = np.sum(mask > 0)
-        if area < 10:
-            continue
-        palette_idx = center_to_palette[label_idx]
-        regions.append((palette_idx, mask, area))
-    
-    regions.sort(key=lambda x: x[2], reverse=True)
-    
-    result = np.zeros((h, w, 3), dtype=np.uint8)
-    
-    for palette_idx, mask, _ in regions:
-        bitmap = mask > 127
-        color = tuple(int(c) for c in palette[palette_idx])
-        
-        try:
-            trace = potracer.Bitmap(bitmap).trace(
-                turdsize=2,
-                alphamax=1.0,
-                opticurve=True,
-                opttolerance=0.2
-            )
-            
-            for curve in trace:
-                points = []
-                start_point = curve.start_point
-                points.append([int(start_point[0]), int(start_point[1])])
-                
-                for segment in curve:
-                    end_point = segment.end_point
-                    if segment.is_corner:
-                        c = segment.c
-                        points.append([int(c[0]), int(c[1])])
-                    else:
-                        c1, c2 = segment.c1, segment.c2
-                        for t in np.linspace(0.1, 0.9, 5):
-                            p = (1-t)**3 * np.array(start_point) + \
-                                3*(1-t)**2*t * np.array(c1) + \
-                                3*(1-t)*t**2 * np.array(c2) + \
-                                t**3 * np.array(end_point)
-                            points.append([int(p[0]), int(p[1])])
-                    points.append([int(end_point[0]), int(end_point[1])])
-                    start_point = end_point
-                
-                if len(points) > 2:
-                    contour = np.array(points, dtype=np.int32).reshape(-1, 1, 2)
-                    cv2.fillPoly(result, [contour], color)
-                    
-        except Exception:
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(result, contours, -1, color, -1)
-    
-    return result
-
-
-def method_color_traced_fallback(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
-    """Color-Traced 的备用实现 (无 Potrace)"""
-    h, w = image.shape[:2]
-    quantized, _ = quantize_image(image, n_colors=16)
-    indices, _ = map_to_palette(quantized, palette)
-    
-    result = np.zeros((h, w, 3), dtype=np.uint8)
-    unique_indices = np.unique(indices)
-    
-    regions = []
-    for idx in unique_indices:
-        mask = (indices == idx).astype(np.uint8) * 255
-        area = np.sum(mask > 0)
-        regions.append((int(idx), mask, area))
-    
-    regions.sort(key=lambda x: x[2], reverse=True)
-    
-    for palette_idx, mask, _ in regions:
-        kernel = np.ones((2, 2), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        color = tuple(int(c) for c in palette[palette_idx])
-        cv2.drawContours(result, contours, -1, color, -1)
-    
-    return result
-
-
-# ============================================================
-# Method 4: Bezier Fitting
+# Method 3: Bezier Fitting
 # ============================================================
 def fit_bezier_to_points(points: np.ndarray, max_error: float = 1.0) -> list:
     """将点序列拟合为三次贝塞尔曲线
@@ -575,7 +462,6 @@ def main():
         ("Dithering (Baseline)", method_dithering),
         ("Potrace", method_potrace),
         ("VTracer", method_vtracer),
-        ("Color-Traced", method_color_traced),
         ("Bezier Fitting", method_bezier_fitting),
     ]
     

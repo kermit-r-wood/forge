@@ -7,7 +7,6 @@ import io
 import numpy as np
 import cv2
 from .base import BaseVectorizer
-from .color_traced import ColorTracedVectorizer
 
 try:
     import vtracer
@@ -52,7 +51,7 @@ class VTracerVectorizer(BaseVectorizer):
     """
 
     def __init__(self):
-        self._fallback = ColorTracedVectorizer()
+        pass
 
     @property
     def is_available(self) -> bool:
@@ -61,7 +60,7 @@ class VTracerVectorizer(BaseVectorizer):
     def apply(self, image: np.ndarray, palette: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """独立矢量化模式（向后兼容）"""
         if not HAS_VTRACER:
-            return self._fallback.apply(image, palette)
+            raise RuntimeError("VTracer not available")
 
         h, w = image.shape[:2]
         UPSCALE = 3
@@ -74,8 +73,8 @@ class VTracerVectorizer(BaseVectorizer):
             indices = self._map_to_palette(result, palette)
             result = palette[indices]
         except Exception as e:
-            print(f"[VTracer] 失败，回退到 ColorTraced: {e}")
-            result, indices = self._fallback.apply(image, palette)
+            print(f"[VTracer] 失败: {e}")
+            raise
 
         return result, indices
 
